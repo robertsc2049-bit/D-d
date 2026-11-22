@@ -1,0 +1,19 @@
+{
+  "name": "solo-adventure-engine",
+  "version": "1.0.0",
+  "description": "A rules engine and campaign memory for solo 5e-style tabletop adventures, built to plug into a ChatGPT Custom GPT as an Action.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "5.1.0"
+  }
+}
