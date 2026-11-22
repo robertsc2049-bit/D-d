@@ -20,6 +20,13 @@ if [ ${#missing[@]} -gt 0 ]; then
   exit 1
 fi
 
+if ! node -v >/dev/null 2>&1; then
+  echo "Node.js is installed but can't run (usually outdated system libraries)."
+  echo "Fix with:  pkg upgrade -y     then run this script again."
+  echo "If that doesn't help:  pkg reinstall libc++ nodejs"
+  exit 1
+fi
+
 if [ ! -d node_modules ]; then
   echo "Installing dependencies (first run only)..."
   npm install --omit=dev --no-audit --no-fund

@@ -40,7 +40,7 @@ ChatGPT's servers call your game server, so even on a phone it needs a public ad
 1. Install **Termux** from [F-Droid](https://f-droid.org/packages/com.termux/). The Play Store version is outdated.
 2. Open Termux and run (first time only):
    ```bash
-   pkg update && pkg install nodejs git cloudflared
+   pkg upgrade -y && pkg install -y nodejs git cloudflared
    git clone https://github.com/robertsc2049-bit/d-d.git
    cd d-d && git checkout ccr-6e1515b1-jcomii
    ```
