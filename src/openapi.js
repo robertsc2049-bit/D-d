@@ -275,7 +275,7 @@ export function buildSpec(serverUrl) {
       },
       '/campaigns/{campaignId}/combat': {
         parameters: [campaignId],
-        post: op('startCombat', 'Start combat', 'Start an encounter: give enemies (and optional allies) with AC, HP, attacks, XP. Server rolls initiative for everyone incl. the player. Set addToExisting to add reinforcements.', {
+        post: op('startCombat', 'Start combat', 'Start an encounter: give enemies (and optional allies) with AC, HP, attacks, XP. Rolls initiative for all. Returns balanceCheck: obey its advice before round 1. addToExisting adds reinforcements.', {
           requestBody: body({
             enemies: { type: 'array', items: combatantSchema },
             allies: { type: 'array', items: combatantSchema, description: 'Friendly NPCs/companions fighting alongside' },

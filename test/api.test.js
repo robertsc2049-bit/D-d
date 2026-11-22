@@ -211,3 +211,19 @@ test('roll endpoint', async () => {
   r = await call('POST', `/campaigns/${id}/roll`, { expression: 'banana' });
   assert.equal(r.status, 400);
 });
+
+test('balance check warns about dangerous solo encounters', async () => {
+  const { id } = await newCampaignWithHero();
+  let r = await call('POST', `/campaigns/${id}/combat`, {
+    enemies: [{ name: 'Wolf', armorClass: 13, maxHp: 11, xp: 50, attacks: [{ name: 'Bite', toHit: 4, damage: '2d4+2' }] }],
+  });
+  assert.equal(r.body.balanceCheck.rating, 'tough');
+  assert.match(r.body.balanceCheck.advice, /^Fair but risky/);
+  await call('POST', `/campaigns/${id}/combat/end`);
+  r = await call('POST', `/campaigns/${id}/combat`, {
+    enemies: [{ name: 'Orc', count: 4, armorClass: 13, maxHp: 15, xp: 100, attacks: [{ name: 'Greataxe', toHit: 5, damage: '1d12+3' }] }],
+  });
+  assert.equal(r.body.balanceCheck.rating, 'deadly');
+  assert.ok(r.body.balanceCheck.warnings.length >= 3);
+  assert.match(r.body.balanceCheck.advice, /^Too dangerous/);
+});

@@ -515,6 +515,62 @@ function sortOrder(combat) {
   });
 }
 
+// ---------- solo balance ----------
+
+// Rough XP budgets for a *single* character (per-level guide, tuned toward the gentle side).
+const SOLO_BUDGET = { routine: [25, 50, 75, 125, 250, 300, 350, 450, 550, 600, 800, 1000, 1100, 1250, 1400, 1600, 2000, 2100, 2400, 2800] };
+SOLO_BUDGET.tough = SOLO_BUDGET.routine.map((x) => x * 2);
+SOLO_BUDGET.deadly = SOLO_BUDGET.routine.map((x) => x * 4);
+
+function averageDamage(expr, critical = false) {
+  try {
+    return roll(expr, { roller: (sides) => (sides + 1) / 2, critical }).total;
+  } catch {
+    return 0;
+  }
+}
+
+/** Estimate how dangerous the active enemies are for one character, so the DM can adjust before round 1. */
+export function balanceCheck(campaign) {
+  const c = campaign.character;
+  const foes = campaign.combat.combatants.filter((x) => x.side === 'enemy' && !x.defeated);
+  const allies = campaign.combat.combatants.filter((x) => x.side === 'ally' && !x.defeated).length;
+  const rawXp = foes.reduce((sum, f) => sum + f.xp, 0);
+  const n = foes.length;
+  const multiplier = n <= 1 ? 1 : n === 2 ? 1.5 : n <= 6 ? 2 : n <= 10 ? 2.5 : 3;
+  const adjustedXp = Math.round(rawXp * multiplier);
+  const lvl = Math.min(20, c.level) - 1;
+  const rating = adjustedXp > SOLO_BUDGET.deadly[lvl] ? 'deadly'
+    : adjustedXp > SOLO_BUDGET.tough[lvl] ? 'hard'
+      : adjustedXp > SOLO_BUDGET.routine[lvl] ? 'tough' : 'routine';
+
+  // Worst case for one round: every foe hits with its strongest attack, on average damage.
+  const worstRound = Math.round(foes.reduce((sum, f) => sum + Math.max(0, ...f.attacks.map((a) => averageDamage(a.damage))), 0));
+  const biggestHit = Math.round(Math.max(0, ...foes.flatMap((f) => f.attacks.map((a) => averageDamage(a.damage, true)))));
+  const warnings = [];
+  if (rating === 'deadly') warnings.push('Encounter XP is far above a solo budget. Remove foes, weaken them, or give the player a clear escape/parley option.');
+  if (worstRound >= c.hp) warnings.push(`If every foe hits this round they average ${worstRound} damage, which would drop ${c.name} (${c.hp} HP) in one round.`);
+  else if (worstRound > c.maxHp / 2) warnings.push(`One bad round averages ${worstRound} damage, more than half of ${c.name}'s max HP.`);
+  if (biggestHit >= c.maxHp && c.level <= 4) warnings.push(`A single critical hit (~${biggestHit}) could take ${c.name} from full HP to 0.`);
+  if (n > 3 && allies === 0) warnings.push(`${n} enemies against one hero: action economy heavily favours the foes. Consider fewer foes or an ally.`);
+  if (!foes.some((f) => f.xp > 0)) warnings.push('No enemy has an xp value, so the difficulty rating is unreliable.');
+
+  return {
+    rating,
+    enemyXp: rawXp,
+    adjustedXp,
+    soloBudget: { routine: SOLO_BUDGET.routine[lvl], tough: SOLO_BUDGET.tough[lvl], deadly: SOLO_BUDGET.deadly[lvl] },
+    worstCaseRoundDamage: worstRound,
+    characterHp: `${c.hp}/${c.maxHp}`,
+    warnings,
+    advice: rating === 'deadly' || worstRound >= c.hp
+      ? 'Too dangerous for a solo hero. Before narrating round 1, fix it: remove or weaken foes with adjustCombatant, add an ally, or turn it into a parley/chase with a clear escape.'
+      : warnings.length
+        ? 'Fair but risky. Fine to run; have enemies fight smart but not cruelly, and let them flee or surrender when bloodied.'
+        : 'Balance looks fair for a solo hero.',
+  };
+}
+
 export function startCombat(campaign, body) {
   const c = campaign.character;
   if (!c) throw bad('Create a character before starting combat.');
@@ -536,7 +592,7 @@ export function startCombat(campaign, body) {
     }
     sortOrder(campaign.combat);
     campaign.combat.turnIndex = campaign.combat.order.indexOf(current);
-    return combatView(campaign);
+    return { ...combatView(campaign), balanceCheck: balanceCheck(campaign) };
   }
 
   const player = {
@@ -561,7 +617,7 @@ export function startCombat(campaign, body) {
     startedAt: new Date().toISOString(),
   };
   sortOrder(campaign.combat);
-  return combatView(campaign);
+  return { ...combatView(campaign), balanceCheck: balanceCheck(campaign) };
 }
 
 function getCombat(campaign) {
