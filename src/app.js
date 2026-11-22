@@ -9,6 +9,7 @@ import {
   nextTurn, endCombat,
 } from './game.js';
 import { rollD20 } from './dice.js';
+import { mcpHandler } from './mcp.js';
 
 const now = () => new Date().toISOString();
 
@@ -61,7 +62,8 @@ export function createApp({ store, apiKey, publicUrl }) {
 <body style="font-family:system-ui;max-width:40rem;margin:3rem auto;padding:0 1rem;line-height:1.5">
 <h1>Solo Adventure Engine</h1>
 <p>This server is running. It is the dice, rules and memory for a ChatGPT Custom GPT dungeon master.</p>
-<p>Import <code>${(publicUrl || `${req.protocol}://${req.get('host')}`)}/openapi.json</code> into your GPT's Actions.</p>
+<p>ChatGPT plugin / MCP connector URL: <code>${(publicUrl || `${req.protocol}://${req.get('host')}`)}/mcp/&lt;your API key&gt;</code></p>
+<p>Custom GPT Action spec: <code>${(publicUrl || `${req.protocol}://${req.get('host')}`)}/openapi.json</code></p>
 </body>`);
   });
   app.get('/health', (req, res) => res.json({ ok: true }));
@@ -72,6 +74,21 @@ export function createApp({ store, apiKey, publicUrl }) {
 <h1>Privacy policy</h1>
 <p>This is a personal game server. It stores only the campaign data your GPT sends it (characters, quests, notes, dice rolls) so your game can continue between chats. Data is kept on this server, is not shared or sold, and can be deleted at any time with the deleteCampaign action.</p>
 </body>`);
+  });
+
+  // ---------- MCP (ChatGPT plugins / custom MCP connectors) ----------
+  // Key can be in the URL (/mcp/<key>, for clients that can't send headers) or as a Bearer header.
+  const mcpAuth = (req, res, next) => {
+    if (!apiKey) return next();
+    const header = req.get('authorization') ?? '';
+    const token = req.params.key ?? (header.startsWith('Bearer ') ? header.slice(7).trim() : '');
+    if (token && safeEqual(token, apiKey)) return next();
+    res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'Wrong or missing key. Use the full MCP URL printed by the server, ending in /mcp/<your key>.' }, id: null });
+  };
+  const handleMcp = mcpHandler({ apiKey });
+  app.post(['/mcp', '/mcp/:key'], mcpAuth, (req, res, next) => handleMcp(req, res).catch(next));
+  app.all(['/mcp', '/mcp/:key'], (req, res) => {
+    res.status(405).set('allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed. This MCP server is stateless: use POST.' }, id: null });
   });
 
   // ---------- auth ----------

@@ -4,6 +4,7 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY src ./src
+COPY gpt ./gpt
 # Mount a persistent volume here so campaigns survive restarts.
 ENV DATA_FILE=/data/campaigns.json
 VOLUME /data

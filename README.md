@@ -1,6 +1,6 @@
 # Solo Adventure Engine
 
-A small server that turns a **ChatGPT Custom GPT** into a solo Dungeon Master for 5th-edition-style fantasy adventures.
+A small server that turns **ChatGPT** (as a plugin / MCP connector, or a Custom GPT) into a solo Dungeon Master for 5th-edition-style fantasy adventures.
 
 ChatGPT does the storytelling. This server does what ChatGPT is bad at:
 
@@ -10,7 +10,7 @@ ChatGPT does the storytelling. This server does what ChatGPT is bad at:
 - **Combat tracking.** Initiative order, enemy HP, conditions, turns and XP awards.
 
 ```
-You  ⇄  ChatGPT (your Custom GPT = the DM)  ⇄  Solo Adventure Engine (this server)
+You  ⇄  ChatGPT (plugin or Custom GPT = the DM)  ⇄  Solo Adventure Engine (this server)
 ```
 
 ---
@@ -65,32 +65,31 @@ Check it works: open `https://YOUR-URL/health`. It should show `{"ok":true}`.
 
 > Optional: set `PUBLIC_URL=https://YOUR-URL` if the spec in the next step shows the wrong address.
 
-### 2. Create the Custom GPT
+### 2. Connect it to ChatGPT
 
-1. In ChatGPT go to **Explore GPTs → Create → Configure**.
-2. **Name:** e.g. "Solo Dungeon Master". **Description:** "Runs solo fantasy adventures with real dice and a saved campaign."
-3. **Instructions:** paste the whole contents of [`gpt/instructions.md`](gpt/instructions.md).
-4. **Conversation starters** (suggestions):
-   - `Continue my campaign`
-   - `Start a new adventure — surprise me`
-   - `Help me create a character`
-   - `Show my character sheet and quests`
-5. **Capabilities:** turning on *Image Generation* is fun for scene art. *Web Search* isn't needed.
-6. **Actions → Create new action:**
-   - Click **Import from URL** and enter `https://YOUR-URL/openapi.json`.
-   - **Authentication → API Key → Auth Type: Bearer**, and paste your `API_KEY`.
-   - **Privacy policy:** `https://YOUR-URL/privacy`
-7. Click **Create** and choose who can see the GPT. **Only me** is recommended.
+> **Custom GPTs are being retired on 11 December 2026** and replaced by ChatGPT **plugins**. GPT "Actions" don't carry over, so connect the server as a plugin through **MCP** instead. The server supports both.
 
-### 3. Play
+**Recommended: ChatGPT plugin (MCP server)**
 
-Open your GPT and say *"Start a new adventure"*. The first time it calls the server, ChatGPT asks for permission. Choose **Always allow** so it doesn't ask before every dice roll. (Deleting a campaign still asks for confirmation.)
+1. Use the **MCP URL**: `https://YOUR-URL/mcp/YOUR_API_KEY`. The Android script prints it for you. Treat it like a password, because the key is inside it.
+2. On chatgpt.com open **Plugins** (chatgpt.com/plugins) → **+** → **Add custom MCP server**. Older accounts have this under Settings → Apps/Connectors → Advanced → **Developer mode** → Create.
+3. Paste the MCP URL, set authentication to **None** (the key is already in the URL), give it a name such as "Solo Adventure Engine", and save.
+4. Start a chat, enable the plugin, and say *"Read the DM guide, then start a new adventure."* The server sends its own DM guide (`getDmGuide`), so you don't need to paste instructions. If your plugin has a place for instructions or a skill, pasting [`gpt/instructions.md`](gpt/instructions.md) there makes it even more reliable.
+
+Menu names in ChatGPT have changed several times. If yours look different, look for "custom MCP server", "connector" or "developer mode".
+
+**Old-style Custom GPT (works until 11 December 2026)**
+
+1. **Explore GPTs → Create → Configure.** Paste [`gpt/instructions.md`](gpt/instructions.md) into **Instructions**.
+2. **Actions → Create new action → Import from URL:** `https://YOUR-URL/openapi.json`.
+3. **Authentication → API Key → Bearer**, then paste your `API_KEY`. **Privacy policy:** `https://YOUR-URL/privacy`.
+4. **Create** → **Only me**. When ChatGPT first asks to call the server, choose **Always allow**.
 
 ---
 
 ## What the GPT can do (Actions)
 
-| Area | Actions |
+| Area | Tools |
 |---|---|
 | Campaigns | `listCampaigns`, `createCampaign`, `getCampaign`, `updateCampaign`, `deleteCampaign` |
 | Character | `createCharacter`, `updateCharacter`, `changeHp`, `rest`, `awardXp`, `levelUp`, `manageInventory` |
@@ -98,7 +97,7 @@ Open your GPT and say *"Start a new adventure"*. The first time it calls the ser
 | Story memory | `addQuest`, `updateQuest`, `addNpc`, `updateNpc`, `addJournalEntry`, `getJournal` |
 | Combat | `startCombat`, `getCombat`, `combatAttack`, `adjustCombatant`, `nextTurn`, `endCombat` |
 
-That's 26 actions, under ChatGPT's limit of 30. The full spec is served at `/openapi.json`.
+Plus `getDmGuide` on the MCP endpoint. The MCP tools at `/mcp` are generated from the same OpenAPI spec served at `/openapi.json`, so both connection methods behave identically.
 
 ## Tips for a good solo game
 

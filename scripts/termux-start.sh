@@ -27,8 +27,8 @@ if ! node -v >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -d node_modules ]; then
-  echo "Installing dependencies (first run only)..."
+if [ ! -d node_modules ] || [ package.json -nt node_modules/.package-lock.json ]; then
+  echo "Installing dependencies..."
   npm install --omit=dev --no-audit --no-fund
 fi
 
@@ -95,19 +95,18 @@ cat <<EOF
 =====================================================
   Your solo adventure server is running!
 
-  Action import URL (ChatGPT -> your GPT -> Actions):
-    $URL/openapi.json
+  ChatGPT PLUGIN / MCP server URL (keep it secret):
+    $URL/mcp/$API_KEY
 
-  API key (Authentication: API Key, type Bearer):
-    $API_KEY
-
-  Privacy policy URL:
-    $URL/privacy
+  -- Only for an old-style Custom GPT Action: --
+  Action import URL:  $URL/openapi.json
+  API key (Bearer):   $API_KEY
+  Privacy policy:     $URL/privacy
 =====================================================
 EOF
 if [ -f "$PREV_URL_FILE" ] && [ "$(cat "$PREV_URL_FILE")" != "$URL" ]; then
-  echo "  NOTE: the address changed since last time. In your GPT's Action,"
-  echo "  click Import from URL again with the new link above, then Update."
+  echo "  NOTE: the address changed since last time. Update the URL in your"
+  echo "  ChatGPT plugin (or re-import your GPT Action) with the new one above."
 fi
 echo "$URL" > "$PREV_URL_FILE"
 echo
