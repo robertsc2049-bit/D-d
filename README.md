@@ -33,7 +33,28 @@ Pick one. Each option stores campaigns in a file on a persistent disk.
 2. Attach a persistent volume mounted at `/data`.
 3. Set the environment variable `API_KEY` to a long random string. You can make one with `openssl rand -hex 32`.
 
-**Option C: run it on your own computer (for trying it out)**
+**Option C: run it on your Android phone (free)**
+
+ChatGPT's servers call your game server, so even on a phone it needs a public address. The script below creates one for free with a Cloudflare tunnel.
+
+1. Install **Termux** from [F-Droid](https://f-droid.org/packages/com.termux/). The Play Store version is outdated.
+2. Open Termux and run (first time only):
+   ```bash
+   pkg update && pkg install nodejs git cloudflared
+   git clone https://github.com/robertsc2049-bit/d-d.git
+   cd d-d && git checkout ccr-6e1515b1-jcomii
+   ```
+   If the repo is private, git asks for a username and password. Use your GitHub username and a [personal access token](https://github.com/settings/tokens) as the password.
+3. Every time you want to play:
+   ```bash
+   cd d-d && bash scripts/termux-start.sh
+   ```
+   It prints the **Action import URL** and **API key** to paste into ChatGPT (step 2 below). The key stays the same between runs.
+4. Keep Termux open while you play. In Android Settings → Apps → Termux → Battery, choose **Unrestricted** so Android doesn't kill it.
+
+Your campaigns are saved on the phone in `d-d/data/`. The free tunnel gets a **new address each time you start it**. When the script says the address changed, open your GPT → Configure → Actions → **Import from URL** with the new link and click **Update**. (A free ngrok account gives one fixed address if you'd rather avoid this.)
+
+**Option D: run it on your own computer (for trying it out)**
 ```bash
 npm install
 API_KEY=pick-a-long-secret npm start
