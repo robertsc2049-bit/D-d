@@ -78,3 +78,10 @@ test('also accepts the key as a Bearer header', async () => {
   assert.ok(tools.length > 20);
   await client.close();
 });
+
+test('OAuth discovery probes get 404, not 401', async () => {
+  for (const p of ['/.well-known/oauth-protected-resource', `/.well-known/oauth-protected-resource/mcp/${KEY}`, '/.well-known/oauth-authorization-server', '/.well-known/openid-configuration']) {
+    const res = await fetch(base + p);
+    assert.equal(res.status, 404, p);
+  }
+});

@@ -12,7 +12,7 @@ if (!apiKey) {
 }
 
 const store = new Store(dataFile);
-const app = createApp({ store, apiKey, publicUrl });
+const app = createApp({ store, apiKey, publicUrl, log: (line) => console.log(line) });
 
 app.listen(port, () => {
   console.log(`Solo Adventure Engine listening on port ${port}`);

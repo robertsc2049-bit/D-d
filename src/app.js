@@ -50,11 +50,28 @@ function safeEqual(a, b) {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function createApp({ store, apiKey, publicUrl }) {
+export function createApp({ store, apiKey, publicUrl, log }) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', true);
   app.use(express.json({ limit: '200kb' }));
+
+  // Request log (secret key redacted) to help debug connection problems: see data/server.log.
+  if (log) {
+    app.use((req, res, next) => {
+      const started = Date.now();
+      res.on('finish', () => {
+        const path = apiKey?.length >= 8 ? req.originalUrl.split(apiKey).join('<key>') : req.originalUrl;
+        const rpc = req.body?.method ? ` ${req.body.method}${req.body.params?.name ? `:${req.body.params.name}` : ''}` : '';
+        log(`${new Date().toISOString()} ${req.method} ${path}${rpc} -> ${res.statusCode} (${Date.now() - started}ms)`);
+      });
+      next();
+    });
+  }
+
+  // OAuth discovery probes (ChatGPT checks these before connecting an MCP server).
+  // Answer "not found" so clients know no OAuth login is needed; the key lives in the MCP URL.
+  app.use('/.well-known', (req, res) => res.status(404).json({ error: 'Not found. This server does not use OAuth.' }));
 
   // ---------- public routes ----------
   app.get('/', (req, res) => {
