@@ -38,14 +38,14 @@ command -v termux-wake-lock >/dev/null && termux-wake-lock || true
 TUNNEL_PID=""
 SERVER_PID=""
 cleanup() {
-  trap - EXIT INT TERM
   echo
   echo "Stopping..."
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
   [ -n "$TUNNEL_PID" ] && kill "$TUNNEL_PID" 2>/dev/null || true
   command -v termux-wake-unlock >/dev/null && termux-wake-unlock || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 echo "Starting tunnel..."
 : > data/tunnel.log
