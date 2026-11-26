@@ -1,6 +1,17 @@
 // Campaign storage.
 // SupabaseStore talks to the project's own database through its REST API, using the service key
 // that Supabase injects into every Edge Function. MemoryStore is for tests.
+//
+// Saves use optimistic concurrency: every campaign has a revision number (rev). put(campaign, rev)
+// only succeeds if nobody saved since that revision was loaded; otherwise it throws ConflictError
+// and the caller reloads and retries, so simultaneous actions never overwrite each other.
+
+export class ConflictError extends Error {
+  constructor() {
+    super('The campaign was changed by another action at the same time.');
+    this.conflict = true;
+  }
+}
 
 export class MemoryStore {
   constructor(accessKey = null) {
@@ -17,8 +28,15 @@ export class MemoryStore {
     return c ? structuredClone(c) : null;
   }
 
-  async put(c) {
-    this.campaigns.set(c.id, structuredClone(c));
+  async create(c) {
+    if (this.campaigns.has(c.id)) throw new Error(`Campaign ${c.id} already exists.`);
+    this.campaigns.set(c.id, structuredClone({ ...c, rev: 0 }));
+  }
+
+  async put(c, expectedRev = c.rev ?? 0) {
+    const current = this.campaigns.get(c.id);
+    if (!current || (current.rev ?? 0) !== expectedRev) throw new ConflictError();
+    this.campaigns.set(c.id, structuredClone({ ...c, rev: expectedRev + 1 }));
   }
 
   async delete(id) {
@@ -58,16 +76,27 @@ export class SupabaseStore {
   }
 
   async get(id) {
-    const rows = await this.request(`/campaigns?select=data&id=eq.${encodeURIComponent(id)}`);
-    return rows[0]?.data ?? null;
+    const rows = await this.request(`/campaigns?select=data,rev&id=eq.${encodeURIComponent(id)}`);
+    return rows[0] ? { ...rows[0].data, rev: rows[0].rev } : null;
   }
 
-  async put(c) {
-    await this.request('/campaigns?on_conflict=id', {
+  async create(c) {
+    await this.request('/campaigns', {
       method: 'POST',
-      body: { id: c.id, name: c.name, data: c, updated_at: c.updatedAt },
-      prefer: 'resolution=merge-duplicates,return=minimal',
+      body: { id: c.id, name: c.name, data: { ...c, rev: 0 }, rev: 0, updated_at: c.updatedAt },
+      prefer: 'return=minimal',
     });
+  }
+
+  // Atomic compare-and-set: UPDATE ... WHERE id = ? AND rev = expectedRev.
+  async put(c, expectedRev = c.rev ?? 0) {
+    const rev = expectedRev + 1;
+    const rows = await this.request(`/campaigns?id=eq.${encodeURIComponent(c.id)}&rev=eq.${expectedRev}&select=id`, {
+      method: 'PATCH',
+      body: { name: c.name, data: { ...c, rev }, rev, updated_at: c.updatedAt },
+      prefer: 'return=representation',
+    });
+    if (!Array.isArray(rows) || rows.length === 0) throw new ConflictError();
   }
 
   async delete(id) {

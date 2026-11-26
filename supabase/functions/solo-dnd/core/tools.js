@@ -161,7 +161,7 @@ const TOOLS = [
         createdAt: now(),
         updatedAt: now(),
       };
-      await store.put(c);
+      await store.create(c);
       return campaignView(c);
     },
   },
@@ -653,6 +653,8 @@ export function listTools() {
   });
 }
 
+const MAX_ATTEMPTS = 8;
+
 /**
  * Run a tool. Returns { ok: true, data } or { ok: false, error }.
  * store: { list(), get(id), put(campaign), delete(id) } (all async).
@@ -664,14 +666,26 @@ export async function callTool(name, args, { store }) {
   try {
     if (tool.kind === 'global') return { ok: true, data: await tool.run(a, { store }) };
     const id = text(a.campaignId, 'campaignId', { required: true, max: 40 });
-    const campaign = await store.get(id);
-    if (!campaign) throw new HttpError(404, `No campaign "${id}". Use listCampaigns to find the right id.`);
-    const data = await tool.run(a, { store, campaign });
-    if (tool.kind === 'write') {
+    // Load, run, save; if another action saved in between, reload and run again on the fresh state.
+    // A losing attempt's result (including its dice) is discarded, so nothing is ever half-applied.
+    for (let attempt = 1; ; attempt++) {
+      const campaign = await store.get(id);
+      if (!campaign) throw new HttpError(404, `No campaign "${id}". Use listCampaigns to find the right id.`);
+      const rev = campaign.rev ?? 0;
+      const data = await tool.run(a, { store, campaign });
+      if (tool.kind !== 'write') return { ok: true, data };
       campaign.updatedAt = now();
-      await store.put(campaign);
+      try {
+        await store.put(campaign, rev);
+        return { ok: true, data };
+      } catch (e) {
+        if (!e?.conflict) throw e;
+        if (attempt >= MAX_ATTEMPTS) {
+          throw new HttpError(409, 'The campaign is busy with other actions right now. Wait a moment and try again; nothing was changed.');
+        }
+        await new Promise((r) => setTimeout(r, Math.random() * 25 * attempt));
+      }
     }
-    return { ok: true, data };
   } catch (e) {
     if (e instanceof HttpError) return { ok: false, error: e.message };
     console.error(`Tool ${name} failed:`, e);
