@@ -8,6 +8,7 @@ import {
   nextTurn, endCombat,
 } from './game.js';
 import { DM_GUIDE } from './guide.js';
+import { syncCampaign } from './mirror.js';
 
 const now = () => new Date().toISOString();
 
@@ -62,6 +63,9 @@ function campaignView(c, journal = 10) {
     tone: c.tone,
     location: c.location,
     inGameDate: c.inGameDate,
+    clock: c.clock ?? null,
+    scene: c.scene ?? null,
+    ledgerSeq: c.lastSeq ?? 0,
     dmNotes: c.notes,
     character: describeCharacter(c.character),
     party: (c.party ?? []).map(describeCharacter),
@@ -181,12 +185,26 @@ const TOOLS = [
     properties: {
       name: S('Title'), setting: S('Setting'), tone: S('Tone'), location: S('Current location'),
       inGameDate: S('In-world date/time'), notes: S('Replace all DM notes'), appendNotes: S('Add a line to the DM notes'),
+      scene: S('One or two sentences: the current scene and who is where (shown at the top of every handoff)'),
     },
-    run: async (a, { campaign: c }) => {
-      const fields = { name: 100, setting: 4000, tone: 200, location: 200, inGameDate: 100, notes: 8000 };
-      for (const [k, max] of Object.entries(fields)) if (a[k] !== undefined) c[k] = text(a[k], k, { max }) ?? null;
-      if (a.appendNotes) c.notes = [c.notes, text(a.appendNotes, 'appendNotes', { max: 2000 })].filter(Boolean).join('\n');
+    run: async (a, { campaign: c, emit }) => {
+      const fields = { name: 100, setting: 4000, tone: 200, location: 200, inGameDate: 100, notes: 8000, scene: 1000 };
+      const changed = [];
+      for (const [k, max] of Object.entries(fields)) {
+        if (a[k] !== undefined) {
+          c[k] = text(a[k], k, { max }) ?? null;
+          changed.push(k);
+        }
+      }
+      if (a.appendNotes) {
+        c.notes = [c.notes, text(a.appendNotes, 'appendNotes', { max: 2000 })].filter(Boolean).join('\n');
+        changed.push('appendNotes');
+      }
       if (c.notes && c.notes.length > 8000) c.notes = c.notes.slice(-8000);
+      if (changed.length) {
+        const shown = Object.fromEntries(changed.filter((k) => k !== 'notes').map((k) => [k, a[k]]));
+        emit(a.scene !== undefined ? 'scene' : 'campaign', `Campaign updated: ${changed.join(', ')}${a.location ? ` (location: ${a.location})` : ''}`, shown);
+      }
       return campaignView(c);
     },
   },
@@ -242,10 +260,11 @@ const TOOLS = [
       personality: S('Traits, ideals, bonds, flaws'),
       backstory: S('Backstory'),
     },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const ch = buildCharacter(a);
       if (!a.partyMember) {
         c.character = { ...ch, id: 'player' };
+        emit('character', `Lead character set: ${ch.name}, level ${ch.level} ${ch.class}`, { hp: ch.maxHp, ac: ch.armorClass, xp: ch.xp });
         return describeCharacter(c.character);
       }
       if (!c.character) throw bad('Create the lead character first, then add party members.');
@@ -258,6 +277,7 @@ const TOOLS = [
         if (c.party.length >= 12) throw bad('At most 12 party members.');
         c.party.push(member);
       }
+      emit('character', `Party member ${existing >= 0 ? 'replaced' : 'added'}: ${ch.name} (${id}), level ${ch.level} ${ch.class}`, { hp: ch.maxHp, ac: ch.armorClass, xp: ch.xp });
       return describeCharacter(member);
     },
   },
@@ -288,7 +308,13 @@ const TOOLS = [
       conditions: list('Full replacement list'), addCondition: S('e.g. poisoned'), removeCondition: S('e.g. poisoned'),
       personality: S('Personality'), backstory: S('Backstory'),
     },
-    run: async (a, { campaign: c }) => describeCharacter(updateCharacter(needCharacter(c, a), a)),
+    run: async (a, { campaign: c, emit }) => {
+      const ch = needCharacter(c, a);
+      updateCharacter(ch, a);
+      const { campaignId: _c, characterId: _id, ...changes } = a;
+      emit('character', `${ch.name} sheet updated: ${Object.keys(changes).join(', ')}`, changes);
+      return describeCharacter(ch);
+    },
   },
   {
     name: 'changeHp',
@@ -302,12 +328,13 @@ const TOOLS = [
       critical: B('Was it a critical hit (matters at 0 HP)'),
       reason: S('e.g. "fell into a pit"'),
     },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const ch = needCharacter(c, a);
       const type = a.type ?? 'damage';
       if (!['damage', 'heal', 'temp'].includes(type)) throw bad('"type" must be damage, heal or temp.');
       const amount = int(a.amount, 'amount', { required: true, min: 0, max: 10000 });
       const r = changeCharacterHp(ch, { type, amount, critical: Boolean(a.critical) });
+      emit('hp', `${ch.name} ${type === 'damage' ? 'takes' : type === 'heal' ? 'heals' : 'gains temp HP'} ${amount}${a.reason ? ` (${a.reason})` : ''}: HP ${r.after.hp}/${r.after.maxHp}${r.dead ? ' DEAD' : ''}`, { before: r.before, after: r.after, notes: r.notes });
       return { type, amount, reason: a.reason ?? null, ...r, conditions: ch.conditions, deathSaves: ch.deathSaves };
     },
   },
@@ -318,11 +345,13 @@ const TOOLS = [
     kind: 'write',
     required: ['type'],
     properties: { type: { type: 'string', enum: ['short', 'long'] }, hitDiceToSpend: I('Short rest only', { minimum: 0 }) },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const ch = needCharacter(c, a);
       if (c.combat) throw bad('You cannot rest during combat. End combat first.');
       if (a.type !== 'short' && a.type !== 'long') throw bad('"type" must be "short" or "long".');
-      return rest(ch, { type: a.type, hitDiceToSpend: int(a.hitDiceToSpend, 'hitDiceToSpend', { min: 0, max: 20 }) ?? 0 });
+      const r = rest(ch, { type: a.type, hitDiceToSpend: int(a.hitDiceToSpend, 'hitDiceToSpend', { min: 0, max: 20 }) ?? 0 });
+      emit('rest', `${ch.name} takes a ${a.type} rest: HP ${ch.hp}/${ch.maxHp}`, { type: a.type, hitDiceSpent: r.hitDiceSpent, rolls: r.rolls, healed: r.healed });
+      return r;
     },
   },
   {
@@ -332,9 +361,11 @@ const TOOLS = [
     kind: 'write',
     required: ['amount'],
     properties: { amount: I('XP', { minimum: 0 }), reason: S('Why') },
-    run: async (a, { campaign: c }) => {
-      const r = awardXp(needCharacter(c, a), int(a.amount, 'amount', { required: true, min: 0, max: 1000000 }));
+    run: async (a, { campaign: c, emit }) => {
+      const ch = needCharacter(c, a);
+      const r = awardXp(ch, int(a.amount, 'amount', { required: true, min: 0, max: 1000000 }));
       if (a.reason) r.reason = text(a.reason, 'reason', { max: 200 });
+      emit('xp', `${ch.name} +${r.awarded} XP${r.reason ? ` (${r.reason})` : ''}: total ${r.xp}${r.canLevelUp ? ' — can level up' : ''}`, { awarded: r.awarded, total: r.xp, reason: r.reason ?? null });
       return r;
     },
   },
@@ -344,11 +375,13 @@ const TOOLS = [
     description: 'Raise level by one and add HP (average or rolled). Afterwards add new features/spells with updateCharacter.',
     kind: 'write',
     properties: { hpMethod: { type: 'string', enum: ['average', 'roll'] } },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const hpMethod = a.hpMethod ?? 'average';
       if (!['average', 'roll'].includes(hpMethod)) throw bad('"hpMethod" must be "average" or "roll".');
       const ch = needCharacter(c, a);
-      return { ...levelUp(ch, { hpMethod }), character: describeCharacter(ch) };
+      const r = levelUp(ch, { hpMethod });
+      emit('xp', `${ch.name} reaches level ${r.level} (+${r.hpGained} HP, max ${r.maxHp})`, { level: r.level, hpGained: r.hpGained, hpRoll: r.hpRoll });
+      return { ...r, character: describeCharacter(ch) };
     },
   },
   {
@@ -364,7 +397,7 @@ const TOOLS = [
       notes: S('Item stats or description, e.g. "1d8 slashing, versatile 1d10"'),
       equipped: B('Equip when adding'),
     },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const ch = needCharacter(c, a);
       const action = a.action ?? 'add';
       let item;
@@ -375,6 +408,7 @@ const TOOLS = [
         if (!item) throw new HttpError(404, `"${a.name}" is not in the inventory.`);
         item.equipped = action === 'equip';
       } else throw bad('"action" must be add, remove, equip or unequip.');
+      emit('item', `${ch.name}: ${action} ${action === 'add' || action === 'remove' ? `${int(a.quantity, 'quantity') ?? 1} × ` : ''}${item.name}`, { action, item: item.name, notes: a.notes ?? null });
       return { action, item, inventory: ch.inventory, gold: ch.gold };
     },
   },
@@ -390,9 +424,11 @@ const TOOLS = [
       advantage,
       count: I('Repeat the roll N times', { minimum: 1, maximum: 20 }),
     },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const r = doRoll(a);
-      logRoll(c, { reason: r.reason, expression: a.expression, result: r.total ?? r.totals ?? r.results?.map((x) => x.total) });
+      const result = r.total ?? r.totals ?? r.results?.map((x) => x.total);
+      logRoll(c, { reason: r.reason, expression: a.expression, result });
+      emit('roll', `${r.reason ?? 'Roll'}: ${r.breakdown ?? `${a.expression} → ${JSON.stringify(result)}`}`, { expression: a.expression, result, advantage: r.advantage ?? null });
       return r;
     },
   },
@@ -413,11 +449,15 @@ const TOOLS = [
       damage: S('Attack only: weapon dice like "1d8"; ability mod added and rolled on hit'),
       reason: S('What the check is for'),
     },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const ch = needCharacter(c, a);
       const r = { character: ch.name, ...characterCheck(ch, a) };
       if (a.reason) r.reason = text(a.reason, 'reason', { max: 200 });
       logRoll(c, { reason: r.reason ?? r.label ?? r.kind, result: r.total ?? r.d20?.natural, success: r.success });
+      const outcome = r.success === undefined ? '' : ` vs DC ${r.dc}: ${r.success ? 'success' : 'failure'}`;
+      emit('check', r.kind === 'death_save'
+        ? `${ch.name} death save: d20 ${r.d20.natural} (successes ${r.deathSaves.successes}, failures ${r.deathSaves.failures})${r.dead ? ' — DIES' : ''}`
+        : `${ch.name} ${r.label}${r.reason ? ` (${r.reason})` : ''}: ${r.breakdown}${outcome}`, { kind: r.kind, total: r.total ?? null, natural: r.d20?.natural, dc: r.dc ?? null, success: r.success ?? null });
       return r;
     },
   },
@@ -428,7 +468,7 @@ const TOOLS = [
     kind: 'write',
     required: ['title'],
     properties: { title: S('Quest title'), description: S('Details'), giver: S('Who gave it'), reward: S('Promised reward') },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const q = {
         id: newId('qst'),
         title: text(a.title, 'title', { required: true, max: 120 }),
@@ -440,6 +480,7 @@ const TOOLS = [
         createdAt: now(),
       };
       c.quests.push(q);
+      emit('quest', `Quest added: ${q.title}${q.giver ? ` (from ${q.giver})` : ''}`, { id: q.id, reward: q.reward });
       return q;
     },
   },
@@ -455,7 +496,7 @@ const TOOLS = [
       progressNote: S('What just happened with this quest'),
       title: S('Title'), description: S('Description'), giver: S('Giver'), reward: S('Reward'),
     },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const q = c.quests.find((x) => x.id === a.questId);
       if (!q) throw new HttpError(404, 'No such quest. Use getCampaign to see quest ids.');
       if (a.status !== undefined) {
@@ -466,6 +507,7 @@ const TOOLS = [
         if (a[k] !== undefined) q[k] = text(a[k], k, { max }) ?? null;
       }
       if (a.progressNote) q.progress.push(text(a.progressNote, 'progressNote', { max: 500 }));
+      emit('quest', `Quest "${q.title}"${a.status ? ` → ${a.status}` : ''}${a.progressNote ? `: ${a.progressNote}` : ''}`, { id: q.id, status: q.status });
       return q;
     },
   },
@@ -476,7 +518,7 @@ const TOOLS = [
     kind: 'write',
     required: ['name'],
     properties: { name: S('Name'), description: S('Looks, voice, role'), location: S('Where found'), attitude: S('friendly / neutral / hostile / etc.'), notes: S('Secrets, motives, history') },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const n = {
         id: newId('npc'),
         name: text(a.name, 'name', { required: true, max: 100 }),
@@ -487,6 +529,7 @@ const TOOLS = [
         alive: true,
       };
       c.npcs.push(n);
+      emit('npc', `NPC recorded: ${n.name} (${n.attitude})${n.location ? ` at ${n.location}` : ''}`, { id: n.id });
       return n;
     },
   },
@@ -501,7 +544,7 @@ const TOOLS = [
       name: S('Name'), description: S('Description'), location: S('Location'), attitude: S('Attitude'),
       notes: S('Replace notes'), appendNotes: S('Add a note'), alive: B('Alive?'),
     },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const n = c.npcs.find((x) => x.id === a.npcId);
       if (!n) throw new HttpError(404, 'No such NPC. Use getCampaign to see NPC ids.');
       for (const [k, max] of Object.entries({ name: 100, description: 1000, location: 200, attitude: 60, notes: 2000 })) {
@@ -509,6 +552,8 @@ const TOOLS = [
       }
       if (a.appendNotes) n.notes = [n.notes, text(a.appendNotes, 'appendNotes', { max: 500 })].filter(Boolean).join('\n');
       if (a.alive !== undefined) n.alive = Boolean(a.alive);
+      const { campaignId: _c, npcId: _n, ...changes } = a;
+      emit('npc', `NPC ${n.name} updated: ${Object.keys(changes).join(', ')}`, changes);
       return n;
     },
   },
@@ -519,7 +564,7 @@ const TOOLS = [
     kind: 'write',
     required: ['entry'],
     properties: { entry: S('Summary, 1-5 sentences'), location: S('Current location'), inGameDate: S('In-world date/time') },
-    run: async (a, { campaign: c }) => {
+    run: async (a, { campaign: c, emit }) => {
       const e = {
         id: newId('jrn'),
         at: now(),
@@ -530,6 +575,7 @@ const TOOLS = [
       if (a.location) c.location = e.location;
       if (a.inGameDate) c.inGameDate = e.inGameDate;
       c.journal.push(e);
+      emit('journal', e.entry, { location: e.location, inGameDate: e.inGameDate });
       return e;
     },
   },
@@ -561,7 +607,11 @@ const TOOLS = [
       playerInitiativeBonus: I('Extra initiative bonus (e.g. Alert feat)'),
       addToExisting: B('Add these to the current fight'),
     },
-    run: async (a, { campaign: c }) => startCombat(c, a),
+    run: async (a, { campaign: c, emit }) => {
+      const r = startCombat(c, a);
+      emit('combat', `${a.addToExisting ? 'Joined combat' : 'Combat started'}: ${r.initiativeOrder.map((x) => `${x.name} ${x.initiative}`).join(', ')} (balance: ${r.balanceCheck.rating})`, { round: r.round, order: r.initiativeOrder.map((x) => ({ id: x.id, name: x.name, initiative: x.initiative })) });
+      return r;
+    },
   },
   {
     name: 'getCombat',
@@ -590,7 +640,11 @@ const TOOLS = [
       damage: S('Override full damage expression, e.g. "1d10" for Fire Bolt'),
       targetHelplessWithin5ft: B('Target is the unconscious player within 5 ft (auto-crit)'),
     },
-    run: async (a, { campaign: c }) => combatAttack(c, a),
+    run: async (a, { campaign: c, emit }) => {
+      const r = combatAttack(c, a);
+      emit('combat', `${r.attacker} → ${r.target} (${r.attack}): ${r.total} vs AC ${r.targetArmorClass} ${r.hit ? `HIT${r.critical ? ' (CRIT)' : ''} for ${r.damageDealt}${r.targetStatus ? `, ${r.target} HP ${r.targetStatus.hp}/${r.targetStatus.maxHp}` : ''}` : 'miss'}`, { natural: r.d20.natural, total: r.total, hit: r.hit, critical: r.critical, damage: r.damageDealt ?? 0 });
+      return r;
+    },
   },
   {
     name: 'adjustCombatant',
@@ -607,7 +661,12 @@ const TOOLS = [
       removeCondition: S('Condition to remove'),
       defeated: B('Enemies only: remove from (true) or return to (false) the fight'),
     },
-    run: async (a, { campaign: c }) => adjustCombatant(c, a.combatantId, a),
+    run: async (a, { campaign: c, emit }) => {
+      const r = adjustCombatant(c, a.combatantId, a);
+      const what = [a.amount !== undefined ? `${a.type ?? 'damage'} ${a.amount}` : null, a.addCondition ? `+${a.addCondition}` : null, a.removeCondition ? `-${a.removeCondition}` : null, a.defeated !== undefined ? (a.defeated ? 'out of the fight' : 'back in the fight') : null].filter(Boolean).join(', ');
+      emit('combat', `${r.combatant}: ${what}${a.reason ? ` (${a.reason})` : ''}${r.status ? ` → HP ${r.status.hp}/${r.status.maxHp}` : ''}`, { amount: a.amount ?? null, type: a.type ?? null });
+      return r;
+    },
   },
   {
     name: 'nextTurn',
@@ -623,7 +682,178 @@ const TOOLS = [
     description: 'Finish the encounter. Awards XP for defeated enemies (or xpOverride) and reports if the character can level up.',
     kind: 'write',
     properties: { xpOverride: I('Award this XP instead') },
-    run: async (a, { campaign: c }) => endCombat(c, a),
+    run: async (a, { campaign: c, emit }) => {
+      const r = endCombat(c, a);
+      emit('combat', `Combat ended after ${r.rounds} round(s): defeated ${r.defeated.join(', ') || 'none'}; survivors ${r.survivors.join(', ') || 'none'}`, { party: r.party, xpByCharacter: r.xpByCharacter, totalXp: r.totalXp });
+      return r;
+    },
+  },
+  {
+    name: 'recordEvent',
+    title: 'Record a story event in the ledger',
+    description: 'Permanently record a consequential non-dice outcome the moment it happens: decision, deal, money, discovery, scene outcome, XP-eligible milestone, canon fact or correction. Dice, HP, items and XP log themselves.',
+    kind: 'write',
+    required: ['type', 'summary'],
+    properties: {
+      type: { type: 'string', enum: ['scene', 'decision', 'deal', 'money', 'discovery', 'milestone', 'fact', 'correction', 'other'] },
+      summary: S('One factual sentence: who did what, with exact names and numbers'),
+      details: S('Optional extra facts (amounts, terms, conditions, what remains unresolved)'),
+      participants: list('Characters involved (names or ids) — matters for later XP attribution'),
+      xpEligible: B('True if this is an active achievement that may earn XP under the campaign rules'),
+      amount: { type: 'number', description: 'Money involved, if any (positive received, negative spent)' },
+      currency: S('Currency of amount, e.g. gp, SOC, credits'),
+      unresolved: B('True if the outcome is still pending/unverified'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const type = text(a.type, 'type', { required: true, max: 20 });
+      const summary = text(a.summary, 'summary', { required: true, max: 1000 });
+      const data = {};
+      if (a.details) data.details = text(a.details, 'details', { max: 4000 });
+      if (Array.isArray(a.participants)) data.participants = a.participants.slice(0, 20).map((p) => text(p, 'participant', { required: true, max: 100 }));
+      if (a.xpEligible !== undefined) data.xpEligible = Boolean(a.xpEligible);
+      if (a.amount !== undefined) {
+        if (typeof a.amount !== 'number' || !Number.isFinite(a.amount)) throw bad('"amount" must be a number.');
+        data.amount = a.amount;
+        data.currency = text(a.currency, 'currency', { max: 20 }) ?? null;
+      }
+      if (a.unresolved !== undefined) data.unresolved = Boolean(a.unresolved);
+      emit(type, summary, data);
+      return { recorded: true, type, summary, ...data };
+    },
+  },
+  {
+    name: 'advanceTime',
+    title: 'Advance in-game time',
+    description: 'The ONLY way in-game time passes. Moves the campaign clock forward and records it. Refuses to pass the end of the accounting cycle unless allowPastClose is true.',
+    kind: 'write',
+    required: ['reason'],
+    properties: {
+      days: I('Whole days to advance', { minimum: 0, maximum: 3650 }),
+      hours: I('Extra hours to advance', { minimum: 0, maximum: 23 }),
+      reason: S('Why time passes, e.g. "travel to Anubis", "long rest"'),
+      allowPastClose: B('Explicitly allow moving beyond the cycle close (only after the player agrees)'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const clock = c.clock;
+      if (!clock) throw bad('This campaign has no clock yet. Set it with setClock (player-confirmed).');
+      const days = int(a.days, 'days', { min: 0, max: 3650 }) ?? 0;
+      const hours = int(a.hours, 'hours', { min: 0, max: 23 }) ?? 0;
+      if (!days && !hours) throw bad('Give days and/or hours to advance.');
+      const reason = text(a.reason, 'reason', { required: true, max: 300 });
+      const totalHours = (clock.hour ?? 0) + hours;
+      const newDay = clock.day + days + Math.floor(totalHours / 24);
+      if (clock.cycleLength && newDay > clock.cycleLength && !a.allowPastClose) {
+        throw bad(`That would pass Day ${clock.cycleLength}/${clock.cycleLength}, the mandatory cycle close. Close/reconcile the cycle first, or ask the player and pass allowPastClose: true.`);
+      }
+      const before = clock.label ?? `Day ${clock.day}/${clock.cycleLength}`;
+      clock.day = newDay;
+      clock.hour = totalHours % 24;
+      clock.label = `Day ${clock.day}${clock.cycleLength ? `/${clock.cycleLength}` : ''}${clock.hour ? ` +${clock.hour}h` : ''}`;
+      emit('time', `Time advances ${days ? `${days} day(s)` : ''}${days && hours ? ' ' : ''}${hours ? `${hours} hour(s)` : ''} (${reason}): ${before} → ${clock.label}`, { days, hours, reason, day: clock.day, hour: clock.hour });
+      return { clock, closeDue: Boolean(clock.cycleLength && clock.day >= clock.cycleLength) };
+    },
+  },
+  {
+    name: 'setClock',
+    title: 'Set or correct the campaign clock',
+    description: 'Set the clock only when the player explicitly confirms or orders it (e.g. confirming an unverified clock, starting a new accounting cycle). Always recorded with the reason.',
+    kind: 'write',
+    required: ['day', 'reason'],
+    properties: {
+      day: I('Current day number', { minimum: 0 }),
+      cycleLength: I('Days per accounting cycle, e.g. 28'),
+      reason: S('Why, e.g. "player confirmed Day 3/28", "player ordered new cycle"'),
+      verified: B('True when the player has confirmed this value'),
+      note: S('Optional note shown with the clock'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const before = c.clock?.label ?? 'unset';
+      const day = int(a.day, 'day', { required: true, min: 0, max: 100000 });
+      const cycleLength = int(a.cycleLength, 'cycleLength', { min: 1, max: 1000 }) ?? c.clock?.cycleLength ?? null;
+      c.clock = {
+        day,
+        hour: 0,
+        cycleLength,
+        label: `Day ${day}${cycleLength ? `/${cycleLength}` : ''}`,
+        verified: a.verified === undefined ? true : Boolean(a.verified),
+        note: text(a.note, 'note', { max: 500 }) ?? null,
+      };
+      const reason = text(a.reason, 'reason', { required: true, max: 300 });
+      emit('time', `Clock set: ${before} → ${c.clock.label}${c.clock.verified ? ' (verified)' : ' (UNVERIFIED)'} — ${reason}`, { ...c.clock, reason });
+      return { clock: c.clock };
+    },
+  },
+  {
+    name: 'getHandoff',
+    title: 'Load the exact live state to resume',
+    description: 'Call at the start of every conversation (after getDmGuide) and whenever unsure. Exact clock, scene, every character\'s HP/XP/conditions, combat, open threads, DM notes and the latest ledger events. Never resume from memory.',
+    kind: 'read',
+    properties: { recentEvents: I('How many recent ledger events to include (default 25)', { minimum: 0, maximum: 100 }) },
+    run: async (a, { campaign: c, store }) => {
+      const n = int(a.recentEvents, 'recentEvents', { min: 0, max: 100 }) ?? 25;
+      const recent = n ? (await store.getEvents(c.id, { limit: n, newestFirst: true })).reverse() : [];
+      const brief = (ch) => ch && ({
+        id: ch.id ?? 'player', name: ch.name, level: ch.level, class: ch.class, hp: ch.hp, maxHp: ch.maxHp, tempHp: ch.tempHp,
+        armorClass: ch.armorClass, xp: ch.xp, conditions: ch.conditions, dead: ch.dead,
+        spellSlotsLeft: Object.fromEntries(Object.entries(ch.spellSlots ?? {}).map(([l, s]) => [l, `${s.max - s.used}/${s.max}`])),
+      });
+      const mirrorState = c.mirror?.repo ? await store.getMirrorState(c.id) : null;
+      return {
+        campaign: { id: c.id, name: c.name, location: c.location, scene: c.scene ?? null, clock: c.clock ?? null, ledgerSeq: c.lastSeq ?? 0 },
+        clockWarning: c.clock?.verified === false ? 'Clock is UNVERIFIED: ask the player to confirm it before any time-sensitive play, then setClock.' : undefined,
+        characters: [brief(c.character), ...(c.party ?? []).map(brief)].filter(Boolean),
+        combat: combatView(c),
+        openThreads: (c.quests ?? []).filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, latest: q.progress.at(-1) ?? null })),
+        dmNotes: c.notes,
+        recentEvents: recent.map((e) => ({ seq: e.seq, at: e.at, type: e.type, summary: e.summary })),
+        mirror: mirrorState ? { repo: c.mirror.repo, path: c.mirror.path, syncedThrough: mirrorState.lastSeq, lastSyncedAt: mirrorState.lastSyncedAt, lastError: mirrorState.lastError } : null,
+      };
+    },
+  },
+  {
+    name: 'getLedger',
+    title: 'Read the event ledger',
+    description: 'Read numbered ledger events (oldest first) to check exactly what happened: e.g. all xp-eligible milestones, money, or everything since a given #.',
+    kind: 'read',
+    properties: {
+      afterSeq: I('Only events after this number', { minimum: 0 }),
+      beforeSeq: I('Only events before this number', { minimum: 1 }),
+      limit: I('Default 50, max 200', { minimum: 1, maximum: 200 }),
+      types: list('Filter by type, e.g. ["milestone","xp","money","decision"]'),
+    },
+    run: async (a, { campaign: c, store }) => {
+      const events = await store.getEvents(c.id, {
+        afterSeq: int(a.afterSeq, 'afterSeq', { min: 0 }) ?? 0,
+        beforeSeq: int(a.beforeSeq, 'beforeSeq', { min: 1 }) ?? null,
+        limit: int(a.limit, 'limit', { min: 1, max: 200 }) ?? 50,
+        types: Array.isArray(a.types) ? a.types.map(String) : null,
+      });
+      return { ledgerSeq: c.lastSeq ?? 0, count: events.length, events };
+    },
+  },
+  {
+    name: 'checkpoint',
+    title: 'Checkpoint: end of scene or session',
+    description: 'Call at the end of every scene and before the conversation ends. Records the scene summary, updates the current scene, and immediately mirrors the ledger and live state to GitHub (if configured).',
+    kind: 'write',
+    required: ['summary'],
+    properties: {
+      summary: S('2-5 factual sentences: what happened in this scene, decisions made, what is unresolved'),
+      scene: S('Where things stand now, for the next conversation to resume from'),
+      location: S('Current location'),
+    },
+    after: async (a, { campaign, ctx }) => {
+      if (!campaign.mirror?.repo) return { mirror: 'not configured' };
+      const r = await syncCampaign(ctx.store, campaign.id, ctx.github);
+      return { mirror: r };
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const summary = text(a.summary, 'summary', { required: true, max: 3000 });
+      if (a.scene !== undefined) c.scene = text(a.scene, 'scene', { max: 1000 });
+      if (a.location !== undefined) c.location = text(a.location, 'location', { max: 200 });
+      emit('checkpoint', summary, { scene: c.scene ?? null, location: c.location ?? null, clock: c.clock?.label ?? null });
+      return { checkpoint: true, summary, scene: c.scene ?? null };
+    },
   },
 ];
 
@@ -659,7 +889,7 @@ const MAX_ATTEMPTS = 8;
  * Run a tool. Returns { ok: true, data } or { ok: false, error }.
  * store: { list(), get(id), put(campaign), delete(id) } (all async).
  */
-export async function callTool(name, args, { store }) {
+export async function callTool(name, args, { store, github = null }) {
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) return { ok: false, error: `Unknown tool "${name}".` };
   const a = args && typeof args === 'object' ? args : {};
@@ -672,12 +902,16 @@ export async function callTool(name, args, { store }) {
       const campaign = await store.get(id);
       if (!campaign) throw new HttpError(404, `No campaign "${id}". Use listCampaigns to find the right id.`);
       const rev = campaign.rev ?? 0;
-      const data = await tool.run(a, { store, campaign });
+      const events = [];
+      const emit = (type, summary, data = null) => events.push({ type, summary: String(summary).slice(0, 2000), data });
+      const data = await tool.run(a, { store, campaign, emit });
       if (tool.kind !== 'write') return { ok: true, data };
       campaign.updatedAt = now();
       try {
-        await store.put(campaign, rev);
-        return { ok: true, data };
+        const saved = await store.put(campaign, rev, events);
+        campaign.lastSeq = saved?.lastSeq ?? campaign.lastSeq;
+        const extra = tool.after ? await tool.after(a, { campaign, ctx: { store, github } }) : {};
+        return { ok: true, data: { ...data, ...extra, ...(events.length ? { ledger: `recorded #${saved.lastSeq - events.length + 1}${events.length > 1 ? `–#${saved.lastSeq}` : ''}` } : {}) } };
       } catch (e) {
         if (!e?.conflict) throw e;
         if (attempt >= MAX_ATTEMPTS) {

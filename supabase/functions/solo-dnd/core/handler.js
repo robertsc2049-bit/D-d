@@ -1,9 +1,11 @@
 // HTTP + MCP (Model Context Protocol, Streamable HTTP, stateless JSON mode) handler.
 // Web-standard Request -> Response, so it runs unchanged on Supabase Edge (Deno) and in Node tests.
 //
-// The only public route is POST .../mcp/<access key>. Everything else, and any wrong key,
-// gets a bare 404, so the server reveals nothing to visitors or scanners.
+// Public routes: POST .../mcp/<access key> (MCP) and POST .../sync/<access key> (push the ledger to GitHub;
+// called by a database cron job). Everything else, and any wrong key, gets a bare 404, so the server
+// reveals nothing to visitors or scanners.
 import { listTools, callTool } from './tools.js';
+import { syncAll } from './mirror.js';
 
 const SERVER_INFO = { name: 'solo-adventure-engine', title: 'Solo Adventure Engine', version: '2.0.0' };
 const SUPPORTED_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
@@ -71,12 +73,15 @@ async function handleMessage(msg, ctx) {
 /**
  * createHandler({ store, getAccessKey }) -> (Request) => Promise<Response>
  * store: campaign storage. getAccessKey: async () => the secret key that must appear in the URL.
+ * github: optional GitHub client for mirroring the ledger.
+ * @param {{ store: any, getAccessKey: () => any, github?: any, log?: (line: string) => void }} options
  */
-export function createHandler({ store, getAccessKey, log = (_line) => {} }) {
+export function createHandler({ store, getAccessKey, github = null, log = (_line) => {} }) {
   return async function handle(req) {
     const url = new URL(req.url);
-    const match = url.pathname.match(/\/mcp\/([A-Za-z0-9_-]{16,128})\/?$/);
+    const match = url.pathname.match(/\/(mcp|sync)\/([A-Za-z0-9_-]{16,128})\/?$/);
     if (!match) return notFound();
+    const [, route, givenKey] = match;
 
     let key;
     try {
@@ -85,10 +90,16 @@ export function createHandler({ store, getAccessKey, log = (_line) => {} }) {
       log(`access key unavailable: ${e.message}`);
       return json({ error: 'Server is not configured yet.' }, 503);
     }
-    if (!key || !safeEqual(match[1], key)) return notFound();
+    if (!key || !safeEqual(givenKey, key)) return notFound();
 
     if (req.method !== 'POST') {
       return new Response(null, { status: 405, headers: { allow: 'POST', ...HIDDEN_HEADERS } });
+    }
+
+    if (route === 'sync') {
+      const results = await syncAll(store, github);
+      log(`sync -> ${JSON.stringify(results).slice(0, 300)}`);
+      return json({ results });
     }
 
     let body;
@@ -98,7 +109,7 @@ export function createHandler({ store, getAccessKey, log = (_line) => {} }) {
       return json(rpcError(null, -32700, 'Request body is not valid JSON.'), 400);
     }
 
-    const ctx = { store };
+    const ctx = { store, github };
     const started = Date.now();
     let response;
     if (Array.isArray(body)) {

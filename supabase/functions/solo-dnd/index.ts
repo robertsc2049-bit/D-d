@@ -2,6 +2,7 @@
 // Deployed with JWT verification OFF: this function does its own auth via the secret key in the URL.
 import { createHandler } from './core/handler.js';
 import { SupabaseStore } from './core/store.js';
+import { GitHub } from './core/mirror.js';
 
 function serviceKey(): string | undefined {
   const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
@@ -20,8 +21,11 @@ function serviceKey(): string | undefined {
 }
 
 const store = new SupabaseStore({ url: Deno.env.get('SUPABASE_URL')!, serviceKey: serviceKey()! });
+const githubToken = Deno.env.get('GITHUB_TOKEN');
+const github = githubToken ? new GitHub({ token: githubToken }) : null;
 const handle = createHandler({
   store,
+  github,
   getAccessKey: () => store.getAccessKey(),
   log: (line: string) => console.log(line),
 });
