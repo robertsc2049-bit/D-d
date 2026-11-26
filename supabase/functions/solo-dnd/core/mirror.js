@@ -60,6 +60,14 @@ export function renderHandoff(campaign, recent) {
   if (campaign.combat) {
     lines.push('## Combat in progress', `- Round ${campaign.combat.round}; ${campaign.combat.combatants.length} combatants`, '');
   }
+  const people = [...(campaign.npcs ?? [])].sort((x, y) => Number(y.alive) - Number(x.alive));
+  if (people.length) {
+    lines.push('## Relationships', ...people.map((n) => {
+      const last = (n.relationshipLog ?? []).at(-1);
+      return `- **${escapeMd(n.name)}**${n.role ? ` (${escapeMd(n.role)})` : ''} — ${escapeMd(n.attitude)}${n.alive === false ? '; DEAD' : ''}`
+        + `${n.relationship ? `: ${escapeMd(n.relationship)}` : ''}${last ? ` _Latest: ${last.day ? `${escapeMd(last.day)}: ` : ''}${escapeMd(last.note)}_` : ''}`;
+    }), '');
+  }
   const open = (campaign.quests ?? []).filter((q) => q.status === 'active');
   if (open.length) lines.push('## Open threads', ...open.map((q) => `- ${escapeMd(q.title)}${q.progress?.length ? ` — latest: ${escapeMd(q.progress.at(-1))}` : ''}`), '');
   lines.push('## Most recent events', ...recent.map(renderLedgerLine), '');

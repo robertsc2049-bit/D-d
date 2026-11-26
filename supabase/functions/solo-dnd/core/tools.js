@@ -92,6 +92,25 @@ function needCharacter(c, a = {}) {
   return m;
 }
 
+function findNpc(c, idOrName, required) {
+  const key = String(idOrName ?? '').trim().toLowerCase();
+  const n = (c.npcs ?? []).find((x) => x.id === idOrName || x.name.toLowerCase() === key);
+  if (!n && required) throw new HttpError(404, `No NPC "${idOrName}". Use getHandoff to see NPC ids and names.`);
+  return n;
+}
+
+/** Relationship roster for handoffs: everyone recorded, living first. */
+function relationshipView(c, { withNotes = true } = {}) {
+  return [...(c.npcs ?? [])]
+    .sort((x, y) => Number(y.alive) - Number(x.alive))
+    .map((n) => ({
+      id: n.id, name: n.name, role: n.role ?? null, attitude: n.attitude, relationship: n.relationship ?? null,
+      recentChanges: (n.relationshipLog ?? []).slice(-3).map((r) => `${r.day ? `${r.day}: ` : ''}${r.note}`),
+      location: n.location, alive: n.alive,
+      ...(withNotes && n.notes ? { dmNotes: n.notes.length > 600 ? `${n.notes.slice(0, 600)}… (full: getCampaign)` : n.notes } : {}),
+    }));
+}
+
 const slug = (name) => name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'member';
 
 function doRoll(a) {
@@ -513,47 +532,67 @@ const TOOLS = [
   },
   {
     name: 'addNpc',
-    title: 'Remember an NPC',
-    description: 'Save a named NPC the character met so they stay consistent across sessions.',
+    title: 'Remember an NPC or companion',
+    description: 'Save a named character (NPC or companion) with their relationship to the lead character, so it stays consistent across conversations. Appears in every getHandoff.',
     kind: 'write',
     required: ['name'],
-    properties: { name: S('Name'), description: S('Looks, voice, role'), location: S('Where found'), attitude: S('friendly / neutral / hostile / etc.'), notes: S('Secrets, motives, history') },
+    properties: {
+      name: S('Name'),
+      role: S('Who they are to the party, e.g. "companion (party id lysa-renn)", "ally, Orthell council", "rival"'),
+      description: S('Looks, voice, personality'),
+      location: S('Where they are now'),
+      attitude: S('friendly / neutral / hostile / etc.'),
+      relationship: S('Current standing with the lead character, in 1-3 sentences: trust, debts, promises, tensions, romance'),
+      notes: S('DM-only: secrets, motives, hidden history. Never revealed to the player.'),
+    },
     run: async (a, { campaign: c, emit }) => {
+      const name = text(a.name, 'name', { required: true, max: 100 });
+      if (findNpc(c, name, false)) throw bad(`"${name}" is already recorded. Use updateNpc.`);
       const n = {
         id: newId('npc'),
-        name: text(a.name, 'name', { required: true, max: 100 }),
+        name,
+        role: text(a.role, 'role', { max: 200 }) ?? null,
         description: text(a.description, 'description', { max: 1000 }) ?? null,
         location: text(a.location, 'location', { max: 200 }) ?? null,
         attitude: text(a.attitude, 'attitude', { max: 60 }) ?? 'neutral',
-        notes: text(a.notes, 'notes', { max: 2000 }) ?? null,
+        relationship: text(a.relationship, 'relationship', { max: 1500 }) ?? null,
+        relationshipLog: [],
+        notes: text(a.notes, 'notes', { max: 4000 }) ?? null,
         alive: true,
       };
       c.npcs.push(n);
-      emit('npc', `NPC recorded: ${n.name} (${n.attitude})${n.location ? ` at ${n.location}` : ''}`, { id: n.id });
+      emit('npc', `NPC recorded: ${n.name}${n.role ? `, ${n.role}` : ''} (${n.attitude})${n.relationship ? ` — ${n.relationship}` : ''}`, { id: n.id });
       return n;
     },
   },
   {
     name: 'updateNpc',
-    title: 'Update an NPC',
-    description: "Change an NPC's attitude, location, notes, or mark them dead.",
+    title: 'Update an NPC or relationship',
+    description: "Change an NPC's attitude, relationship with the lead, location or notes, or mark them dead. Use relationshipNote the moment a relationship shifts (trust gained/lost, promise made/broken, confession, betrayal).",
     kind: 'write',
     required: ['npcId'],
     properties: {
-      npcId: S('NPC id, e.g. npc_1a2b3c4d'),
-      name: S('Name'), description: S('Description'), location: S('Location'), attitude: S('Attitude'),
-      notes: S('Replace notes'), appendNotes: S('Add a note'), alive: B('Alive?'),
+      npcId: S('NPC id (npc_...) or exact name'),
+      name: S('Name'), role: S('Role'), description: S('Description'), location: S('Location'), attitude: S('Attitude'),
+      relationship: S('Replace the current-standing summary'),
+      relationshipNote: S('What just changed between them and the lead, in one sentence (kept as dated history)'),
+      notes: S('Replace DM-only notes'), appendNotes: S('Add a DM-only note'), alive: B('Alive?'),
     },
     run: async (a, { campaign: c, emit }) => {
-      const n = c.npcs.find((x) => x.id === a.npcId);
-      if (!n) throw new HttpError(404, 'No such NPC. Use getCampaign to see NPC ids.');
-      for (const [k, max] of Object.entries({ name: 100, description: 1000, location: 200, attitude: 60, notes: 2000 })) {
+      const n = findNpc(c, a.npcId, true);
+      for (const [k, max] of Object.entries({ name: 100, role: 200, description: 1000, location: 200, attitude: 60, relationship: 1500, notes: 4000 })) {
         if (a[k] !== undefined) n[k] = text(a[k], k, { max }) ?? null;
       }
-      if (a.appendNotes) n.notes = [n.notes, text(a.appendNotes, 'appendNotes', { max: 500 })].filter(Boolean).join('\n');
+      if (a.appendNotes) n.notes = [n.notes, text(a.appendNotes, 'appendNotes', { max: 1000 })].filter(Boolean).join('\n').slice(-4000);
+      if (a.relationshipNote) {
+        n.relationshipLog = n.relationshipLog ?? [];
+        n.relationshipLog.push({ at: now(), day: c.clock?.label ?? null, note: text(a.relationshipNote, 'relationshipNote', { max: 500 }) });
+        if (n.relationshipLog.length > 50) n.relationshipLog.splice(0, n.relationshipLog.length - 50);
+      }
       if (a.alive !== undefined) n.alive = Boolean(a.alive);
-      const { campaignId: _c, npcId: _n, ...changes } = a;
-      emit('npc', `NPC ${n.name} updated: ${Object.keys(changes).join(', ')}`, changes);
+      const { campaignId: _c, npcId: _n, notes: _no, appendNotes: _an, ...shown } = a;
+      const secret = a.notes !== undefined || a.appendNotes ? ' (+DM notes)' : '';
+      emit('npc', `NPC ${n.name} updated: ${a.relationshipNote ?? Object.keys(shown).join(', ')}${secret}`, shown);
       return n;
     },
   },
@@ -786,7 +825,7 @@ const TOOLS = [
   {
     name: 'getHandoff',
     title: 'Load the exact live state to resume',
-    description: 'Call at the start of every conversation (after getDmGuide) and whenever unsure. Exact clock, scene, every character\'s HP/XP/conditions, combat, open threads, DM notes and the latest ledger events. Never resume from memory.',
+    description: 'Call at the start of every conversation (after getDmGuide) and whenever unsure. Exact clock, scene, every character\'s HP/XP/conditions, relationships with every recorded NPC/companion, combat, open threads, DM notes and the latest ledger events. Never resume from memory.',
     kind: 'read',
     properties: { recentEvents: I('How many recent ledger events to include (default 25)', { minimum: 0, maximum: 100 }) },
     run: async (a, { campaign: c, store }) => {
@@ -803,6 +842,7 @@ const TOOLS = [
         clockWarning: c.clock?.verified === false ? 'Clock is UNVERIFIED: ask the player to confirm it before any time-sensitive play, then setClock.' : undefined,
         characters: [brief(c.character), ...(c.party ?? []).map(brief)].filter(Boolean),
         combat: combatView(c),
+        relationships: relationshipView(c),
         openThreads: (c.quests ?? []).filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, latest: q.progress.at(-1) ?? null })),
         dmNotes: c.notes,
         recentEvents: recent.map((e) => ({ seq: e.seq, at: e.at, type: e.type, summary: e.summary })),

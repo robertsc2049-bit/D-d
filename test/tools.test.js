@@ -285,3 +285,25 @@ test('party: members get full sheets, own checks, combat turns and XP shares', a
   assert.ok(r.initiativeOrder.some((x) => x.id === 'halric-fen'));
   assert.ok(!r.initiativeOrder.some((x) => x.id === 'lysa-renn'));
 });
+
+test('relationships: recorded, updated by name, shown in getHandoff and the mirror', async () => {
+  const { ok, call, id } = await setup();
+  const n = await ok('addNpc', { campaignId: id, name: 'Lysa Renn', role: 'companion (party id lysa-renn)', attitude: 'loyal', relationship: 'Trusted partner.', notes: 'Hides a debt.' });
+  assert.equal((await call('addNpc', { campaignId: id, name: 'lysa renn' })).ok, false);
+  await ok('setClock', { campaignId: id, day: 3, cycleLength: 28, reason: 'test' });
+  const u = await ok('updateNpc', { campaignId: id, npcId: 'Lysa Renn', relationshipNote: 'Elias kept his promise about the escrow.', appendNotes: 'Debt is 40k.' });
+  assert.equal(u.id, n.id);
+  assert.equal(u.relationshipLog[0].day, 'Day 3/28');
+  assert.match(u.notes, /Hides a debt\.\nDebt is 40k\./);
+  const h = await ok('getHandoff', { campaignId: id });
+  assert.equal(h.relationships[0].name, 'Lysa Renn');
+  assert.equal(h.relationships[0].relationship, 'Trusted partner.');
+  assert.deepEqual(h.relationships[0].recentChanges, ['Day 3/28: Elias kept his promise about the escrow.']);
+  assert.match(h.relationships[0].dmNotes, /Debt is 40k/);
+  const ledger = await ok('getLedger', { campaignId: id, types: ['npc'] });
+  assert.ok(!JSON.stringify(ledger).includes('40k'), 'secret notes stay out of the ledger summary');
+  const { renderHandoff } = await import('../supabase/functions/solo-dnd/core/mirror.js');
+  const md = renderHandoff({ ...(await ok('getCampaign', { campaignId: id })), npcs: [u] }, []);
+  assert.match(md, /## Relationships\n- \*\*Lysa Renn\*\* \(companion \(party id lysa-renn\)\) — loyal: Trusted partner\. _Latest: Day 3\/28: Elias kept his promise/);
+  assert.ok(!md.includes('40k'));
+});

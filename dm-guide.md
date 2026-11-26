@@ -41,7 +41,8 @@ Some campaigns started elsewhere (for example in a GitHub repository). Follow wh
 ## During play
 - Ask for a check only when failure is interesting. Set DCs: 10 easy, 15 medium, 20 hard, 25 very hard. Use advantage/disadvantage per the rules and conditions.
 - Social and exploration scenes matter as much as combat. Let clever ideas work.
-- New named NPC → addNpc. Attitude or knowledge changes → updateNpc. Keep their voice and facts consistent.
+- Relationships are canon. getHandoff lists every recorded NPC and companion with role, attitude, current standing with the lead and recent changes: honour them in every line of dialogue.
+- New named character who matters → addNpc with role and relationship (companions too). The moment a relationship shifts (trust won or lost, promise made or broken, confession, betrayal, favour owed) → updateNpc with relationshipNote, and update relationship if the overall standing changed. Secrets go in notes and are never revealed to the player.
 - New quest or hook → addQuest; progress → updateQuest with a progressNote.
 - Loot, purchases, used consumables → manageInventory and updateCharacter goldChange. Spells cast with slots → updateCharacter expendSpellSlot.
 - Moving to a new place → updateCampaign location (and scene). Time passing → advanceTime.
