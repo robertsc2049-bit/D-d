@@ -165,3 +165,42 @@ test('unknown campaign and tool give clear errors', async () => {
   assert.match((await call('getCampaign', {})).error, /campaignId/);
   assert.match((await call('fly', {})).error, /Unknown tool/);
 });
+
+test('Elias (level 18 Mastermind) matches the campaign repo numbers', async () => {
+  const store = new MemoryStore();
+  const ctx = { store };
+  const camp = (await callTool('createCampaign', { name: 'Elias check' }, ctx)).data;
+  const r = await callTool('createCharacter', {
+    campaignId: camp.id, name: 'Elias Mere', class: 'rogue', subclass: 'Mastermind', level: 18, xp: 265000,
+    abilityScores: { str: 8, dex: 20, con: 12, int: 12, wis: 10, cha: 20 }, armorClass: 17,
+    savingThrowProficiencies: ['dex', 'int', 'wis'],
+    skillProficiencies: ['sleight_of_hand', 'stealth', 'investigation'],
+    expertise: ['deception', 'persuasion', 'insight', 'perception'],
+    checkBonus: 1, saveBonus: 1, reliableTalent: true,
+  }, ctx);
+  assert.ok(r.ok, r.error);
+  const d = r.data.derived;
+  // Values recorded in campaigns/star-trek-transfer/CREW_AND_MECHANICS.json ("live with Luckstone")
+  assert.deepEqual(
+    { de: d.skills.deception, pe: d.skills.persuasion, in: d.skills.insight, pc: d.skills.perception, sh: d.skills.sleight_of_hand, st: d.skills.stealth, iv: d.skills.investigation },
+    { de: '+18', pe: '+18', in: '+13', pc: '+13', sh: '+12', st: '+12', iv: '+8' },
+  );
+  assert.equal(d.savingThrows.wis, '+7');
+  assert.equal(d.passivePerception, 23);
+  assert.equal(d.proficiencyBonus, 6);
+  assert.equal(d.initiative, '+6');
+  assert.equal(r.data.maxHp, 111); // fixed-average HP for Rogue 18 with CON 12
+
+  // Reliable Talent: a natural 3 on a proficient skill counts as 10; luckstone adds +1.
+  const low = await withDice(3, () => callTool('makeCheck', { campaignId: camp.id, kind: 'skill', skill: 'deception' }, ctx));
+  assert.equal(low.data.total, 28);
+  assert.equal(low.data.reliableTalentApplied, true);
+  // Not proficient in athletics: no Reliable Talent, luckstone still applies.
+  const ath = await withDice(3, () => callTool('makeCheck', { campaignId: camp.id, kind: 'skill', skill: 'athletics' }, ctx));
+  assert.equal(ath.data.total, 3 - 1 + 1);
+  // Saves get the luckstone, attacks do not.
+  const save = await withDice(10, () => callTool('makeCheck', { campaignId: camp.id, kind: 'save', ability: 'wis' }, ctx));
+  assert.equal(save.data.total, 17);
+  const atk = await withDice(10, () => callTool('makeCheck', { campaignId: camp.id, kind: 'attack', ability: 'dex' }, ctx));
+  assert.equal(atk.data.total, 21);
+});

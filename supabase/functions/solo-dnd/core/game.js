@@ -153,6 +153,9 @@ export function buildCharacter(body) {
     gold: int(body.gold, 'gold', { min: 0 }) ?? 0,
     inventory: [],
     conditions: [],
+    checkBonus: int(body.checkBonus, 'checkBonus', { min: -10, max: 10 }) ?? 0,
+    saveBonus: int(body.saveBonus, 'saveBonus', { min: -10, max: 10 }) ?? 0,
+    reliableTalent: Boolean(body.reliableTalent),
     inspiration: false,
     deathSaves: { successes: 0, failures: 0 },
     dead: false,
@@ -202,6 +205,9 @@ export function updateCharacter(c, body) {
     c.gold = next;
   }
   if (body.inspiration !== undefined) c.inspiration = Boolean(body.inspiration);
+  if (body.checkBonus !== undefined) c.checkBonus = int(body.checkBonus, 'checkBonus', { required: true, min: -10, max: 10 });
+  if (body.saveBonus !== undefined) c.saveBonus = int(body.saveBonus, 'saveBonus', { required: true, min: -10, max: 10 });
+  if (body.reliableTalent !== undefined) c.reliableTalent = Boolean(body.reliableTalent);
   if (body.conditions !== undefined) c.conditions = (textList(body.conditions, 'conditions') ?? []).map(normalizeKey);
   if (body.addCondition !== undefined) {
     const cond = normalizeKey(text(body.addCondition, 'addCondition', { required: true, max: 60 }));
@@ -428,10 +434,16 @@ export function characterCheck(c, body) {
     throw bad('"kind" must be one of: skill, ability, save, attack, initiative, death_save.');
   }
 
+  // Standing bonuses from the sheet: checkBonus on ability checks (incl. skills, initiative), saveBonus on saves.
+  const standing = kind === 'save' ? c.saveBonus ?? 0 : kind === 'attack' ? 0 : c.checkBonus ?? 0;
+  if (standing) parts.itemBonus = standing;
   if (extra) parts.bonus = extra;
-  modifier += extra;
+  modifier += standing + extra;
   const d = rollD20(mode);
-  const total = d.natural + modifier;
+  // Reliable Talent (Rogue 11+): a proficient ability check treats a d20 roll of 9 or lower as a 10.
+  const reliable = Boolean(c.reliableTalent) && kind === 'skill' && parts.proficiency > 0 && d.natural < 10;
+  const effective = reliable ? 10 : d.natural;
+  const total = effective + modifier;
   const result = {
     kind,
     label,
@@ -439,7 +451,8 @@ export function characterCheck(c, body) {
     modifier: signed(modifier),
     modifierParts: parts,
     total,
-    breakdown: `d20(${d.rolls.join(d.mode === 'none' ? '' : '/')}) ${signed(modifier)} = ${total}`,
+    breakdown: `d20(${d.rolls.join(d.mode === 'none' ? '' : '/')}${reliable ? '→10 Reliable Talent' : ''}) ${signed(modifier)} = ${total}`,
+    ...(reliable ? { reliableTalentApplied: true } : {}),
     natural20: d.natural === 20,
     natural1: d.natural === 1,
   };
@@ -598,7 +611,7 @@ export function startCombat(campaign, body) {
     id: 'player',
     name: c.name,
     side: 'player',
-    initiativeBonus: abilityMod(c.abilityScores.dex) + (int(body.playerInitiativeBonus, 'playerInitiativeBonus', { min: -10, max: 20 }) ?? 0),
+    initiativeBonus: abilityMod(c.abilityScores.dex) + (c.checkBonus ?? 0) + (int(body.playerInitiativeBonus, 'playerInitiativeBonus', { min: -10, max: 20 }) ?? 0),
     conditions: [],
   };
   const all = [player, ...newcomers];

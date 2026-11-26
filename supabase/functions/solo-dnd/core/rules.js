@@ -79,11 +79,13 @@ export function describeCharacter(c) {
   if (!c) return null;
   const pb = proficiencyBonus(c.level);
   const mods = Object.fromEntries(ABILITIES.map((a) => [a, abilityMod(c.abilityScores[a])]));
+  const checkBonus = c.checkBonus ?? 0; // e.g. Stone of Good Luck: applies to every ability check
+  const saveBonus = c.saveBonus ?? 0; // e.g. Stone of Good Luck / Cloak of Protection: every saving throw
   const savingThrows = Object.fromEntries(
-    ABILITIES.map((a) => [a, signed(mods[a] + (c.savingThrowProficiencies.includes(a) ? pb : 0))]),
+    ABILITIES.map((a) => [a, signed(mods[a] + (c.savingThrowProficiencies.includes(a) ? pb : 0) + saveBonus)]),
   );
   const skillBonus = (s) =>
-    mods[SKILLS[s]] + (c.expertise.includes(s) ? pb * 2 : c.skillProficiencies.includes(s) ? pb : 0);
+    mods[SKILLS[s]] + (c.expertise.includes(s) ? pb * 2 : c.skillProficiencies.includes(s) ? pb : 0) + checkBonus;
   const skills = Object.fromEntries(Object.keys(SKILLS).map((s) => [s, signed(skillBonus(s))]));
   const nextXp = XP_THRESHOLDS[c.level] ?? null;
   return {
@@ -93,7 +95,8 @@ export function describeCharacter(c) {
       abilityModifiers: Object.fromEntries(ABILITIES.map((a) => [a, signed(mods[a])])),
       savingThrows,
       skills,
-      initiative: signed(mods.dex),
+      initiative: signed(mods.dex + checkBonus),
+      reliableTalent: Boolean(c.reliableTalent),
       passivePerception: 10 + skillBonus('perception'),
       spellSaveDc: c.spellcastingAbility ? 8 + pb + mods[c.spellcastingAbility] : null,
       spellAttackBonus: c.spellcastingAbility ? signed(pb + mods[c.spellcastingAbility]) : null,
