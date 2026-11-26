@@ -307,3 +307,33 @@ test('relationships: recorded, updated by name, shown in getHandoff and the mirr
   assert.match(md, /## Relationships\n- \*\*Lysa Renn\*\* \(companion \(party id lysa-renn\)\) — loyal: Trusted partner\. _Latest: Day 3\/28: Elias kept his promise/);
   assert.ok(!md.includes('40k'));
 });
+
+test('books: accounts, transfers, equity and fleet are ledgered and validated', async () => {
+  const { ok, call, id } = await setup();
+  await ok('setAccount', { campaignId: id, id: 'mrc-cash', name: 'MRC unrestricted', owner: 'MRC', currency: 'cr', kind: 'cash', balance: 1000, reason: 'opening' });
+  await ok('setAccount', { campaignId: id, id: 'mrc-term', name: 'MRC term deposit', owner: 'MRC', currency: 'cr', kind: 'term', balance: 50, reason: 'opening' });
+  await ok('setAccount', { campaignId: id, id: 'elias', name: 'Elias personal', currency: 'SOC', kind: 'cash', balance: 10, reason: 'opening' });
+  const t = await ok('postTransaction', { campaignId: id, fromAccount: 'mrc-cash', toAccount: 'MRC term deposit', amount: 200.5, reason: 'move to term' });
+  assert.deepEqual(t.changes.map((x) => x.after), [799.5, 250.5]);
+  assert.equal((await call('postTransaction', { campaignId: id, fromAccount: 'mrc-cash', toAccount: 'elias', amount: 1, reason: 'x' })).ok, false, 'no implicit FX');
+  assert.equal((await call('postTransaction', { campaignId: id, account: 'elias', amount: -11, reason: 'overspend' })).ok, false, 'no overdraft');
+  await ok('postTransaction', { campaignId: id, account: 'elias', amount: -4, reason: 'bagpipe lessons' });
+  assert.equal((await call('setHolding', { campaignId: id, entity: 'Venture', owners: [{ owner: 'A', pct: 60 }, { owner: 'B', pct: 50 }], reason: 'x' })).ok, false);
+  await ok('setHolding', { campaignId: id, entity: 'Venture', type: 'company', owners: [{ owner: 'A', pct: 60 }, { owner: 'B', pct: 40 }], reason: 'founding' });
+  await ok('updateShip', { campaignId: id, designation: 'MRC-1', create: true, name: 'First Light', owner: 'MRC', status: 'Missing', reason: 'register' });
+  await ok('updateShip', { campaignId: id, designation: 'first light', status: 'Found', reason: 'Longwatch success' });
+  assert.equal((await call('updateShip', { campaignId: id, designation: 'MRC-999', status: 'x', reason: 'x' })).ok, false);
+  const f = await ok('getFinances', { campaignId: id });
+  assert.deepEqual(f.totalsByCurrency, { cr: { cash: 799.5, term: 250.5 }, SOC: { cash: 6 } });
+  assert.equal(f.holdings[0].owners[1].pct, 40);
+  const fl = await ok('getFleet', { campaignId: id, query: 'found' });
+  assert.equal(fl.ships[0].name, 'First Light');
+  const h = await ok('getHandoff', { campaignId: id, recentEvents: 20 });
+  assert.equal(h.fleet.ships, 1);
+  assert.equal(h.finances.accounts.length, 3);
+  assert.ok(h.recentEvents.some((e) => e.type === 'money' && /bagpipe lessons: Elias personal -4 SOC → 6/.test(e.summary)));
+  const { renderFinances, renderFleet } = await import('../supabase/functions/solo-dnd/core/ledgers.js');
+  const c = await ok('getCampaign', { campaignId: id });
+  assert.equal(renderFinances(c), null, 'getCampaign view has no books; mirror renders from the raw campaign');
+  assert.match(renderFleet({ name: 'x', fleet: [{ designation: 'MRC-1', name: 'First Light' }] }), /\| MRC-1 \| First Light \|/);
+});

@@ -1,5 +1,6 @@
 // GitHub mirror: commits the live state and the event ledger into a folder of a GitHub repository,
 // in ONE commit per sync, using the Git Data API. It only ever writes inside the configured folder.
+import { renderFinances, renderFleet } from './ledgers.js';
 // Campaign config: campaign.mirror = { repo: "owner/name", branch: "main", path: "campaigns/x/live" }.
 
 const MONTH = (iso) => iso.slice(0, 7);
@@ -81,6 +82,7 @@ Do not edit these files by hand: the next sync overwrites them.
 
 - \`HANDOFF_LIVE.md\`: current clock, scene, character HP/XP/conditions and the latest events.
 - \`STATE.json\`: the complete machine-readable live state.
+- \`FINANCES.md\` / \`FLEET.md\`: accounts, equity and the ship register (when the campaign keeps books).
 - \`ledger/YYYY-MM.md\`: every event, numbered, written at the moment it happened. Append-only.
 
 Precedence: this live layer supersedes older repository files for anything it records.
@@ -165,6 +167,10 @@ export async function syncCampaign(store, campaignId, github) {
     files[`${base}/STATE.json`] = `${JSON.stringify(publicState, null, 2)}\n`;
     files[`${base}/HANDOFF_LIVE.md`] = renderHandoff(campaign, recent);
     files[`${base}/README.md`] = README(campaign);
+    const fin = renderFinances(campaign);
+    if (fin) files[`${base}/FINANCES.md`] = fin;
+    const fleet = renderFleet(campaign);
+    if (fleet) files[`${base}/FLEET.md`] = fleet;
     const syncedTo = fresh.length ? fresh.at(-1).seq : lastSeq;
     const sha = await github.commitFiles({
       repo: campaign.mirror.repo,

@@ -9,6 +9,7 @@ import {
 } from './game.js';
 import { DM_GUIDE } from './guide.js';
 import { syncCampaign } from './mirror.js';
+import { books, postTransaction, upsertAccount, setHolding, updateShip, findShip, financeView, fleetSummary } from './ledgers.js';
 
 const now = () => new Date().toISOString();
 
@@ -728,6 +729,118 @@ const TOOLS = [
     },
   },
   {
+    name: 'getFinances',
+    title: 'Read accounts, equity and recurring lines',
+    description: 'Exact current balances of every account (never converted between currencies), recurring per-cycle lines, equity/ownership of every business, and audit qualifications. Read this before any money decision or close.',
+    kind: 'read',
+    properties: {},
+    run: async (a, { campaign: c }) => financeView(c),
+  },
+  {
+    name: 'postTransaction',
+    title: 'Post money in, out or between accounts',
+    description: 'The ONLY way money moves. Single posting (account + signed amount) or same-currency transfer (fromAccount, toAccount, positive amount). Recorded in the ledger with before/after balances. Never posts cross-currency conversions implicitly.',
+    kind: 'write',
+    required: ['amount', 'reason'],
+    properties: {
+      account: S('Account id or name for a single posting'),
+      fromAccount: S('Transfer source account'),
+      toAccount: S('Transfer destination account'),
+      amount: { type: 'number', description: 'Signed amount for a single posting (+ in, - out); positive for transfers' },
+      reason: S('What it is for, with counterparty and terms'),
+      allowNegative: B('Allow a cash/inventory account to go negative (overdraft) — only if canon allows it'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const r = postTransaction(c, a);
+      emit('money', `${r.reason}: ${r.changes.map((x) => `${x.name} ${x.delta >= 0 ? '+' : ''}${x.delta.toLocaleString('en-US')} ${x.currency} → ${x.after.toLocaleString('en-US')}`).join('; ')}`, { changes: r.changes });
+      return r;
+    },
+  },
+  {
+    name: 'setAccount',
+    title: 'Open, correct or reconcile an account',
+    description: 'Create an account or set its balance/status directly. Only for opening accounts, reconciliations and player-confirmed corrections (always with a reason); everyday money movement uses postTransaction.',
+    kind: 'write',
+    required: ['reason'],
+    properties: {
+      id: S('Account id (existing or new)'), name: S('Account name'), owner: S('Who owns it'),
+      currency: S('e.g. cr, SOC, gp, t latinum'),
+      kind: { type: 'string', enum: ['cash', 'term', 'reserve', 'receivable', 'liability', 'inventory', 'other'] },
+      balance: { type: 'number', description: 'New balance' },
+      status: S('e.g. verified, reference (last documented), unverified'),
+      notes: S('Restrictions, terms, double-count warnings'),
+      reason: S('Why (e.g. "Day 28 close reconciliation", "player correction")'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const reason = text(a.reason, 'reason', { required: true, max: 500 });
+      const r = upsertAccount(c, a);
+      emit(r.before ? 'correction' : 'money', `${r.before ? 'Account adjusted' : 'Account opened'}: ${r.after.name} ${r.before && r.before.balance !== r.after.balance ? `${r.before.balance.toLocaleString('en-US')} → ` : ''}${r.after.balance.toLocaleString('en-US')} ${r.after.currency} (${reason})`, { before: r.before, after: r.after, reason });
+      return r.after;
+    },
+  },
+  {
+    name: 'setHolding',
+    title: 'Record ownership / equity of a business or asset',
+    description: 'Set who owns what share of a business, property or venture. Replaces the owners list for that entity; percentages may total less than 100 if the rest is unrecorded.',
+    kind: 'write',
+    required: ['entity', 'reason'],
+    properties: {
+      entity: S('Business or asset name'),
+      type: S('e.g. company, venture, mine, property, minority investment'),
+      owners: { type: 'array', items: { type: 'object', required: ['owner'], properties: { owner: S('Owner'), pct: { type: 'number', description: 'Percent' }, basis: S('e.g. share of net distributable production') } } },
+      notes: S('Terms, buy-down rights, unresolved points'),
+      reason: S('Why it changed'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const reason = text(a.reason, 'reason', { required: true, max: 500 });
+      const r = setHolding(c, a);
+      emit('deal', `Ownership ${r.before ? 'changed' : 'recorded'}: ${r.after.entity} — ${r.after.owners.map((o) => `${o.owner}${o.pct === null ? '' : ` ${o.pct}%`}`).join(', ')} (${reason})`, { before: r.before, after: r.after });
+      return r.after;
+    },
+  },
+  {
+    name: 'getFleet',
+    title: 'Read the fleet register',
+    description: 'Search the ship register (designation, name, owner, status, role, crew, Marines, notes). Filter with query (matches any field), owner or status.',
+    kind: 'read',
+    properties: {
+      query: S('Text to match, e.g. "Mercy", "dreadnought", "MRC-2"'),
+      owner: S('Owner filter, e.g. "Elias", "MRC"'),
+      status: S('Status filter, e.g. "Operational", "Missing"'),
+      limit: I('Default 50, max 400', { minimum: 1, maximum: 400 }),
+    },
+    run: async (a, { campaign: c }) => {
+      const q = (v) => String(v ?? '').toLowerCase();
+      let list = books(c).fleet;
+      if (a.owner) list = list.filter((s) => q(s.owner).includes(q(a.owner)));
+      if (a.status) list = list.filter((s) => q(s.status).includes(q(a.status)));
+      if (a.query) list = list.filter((s) => Object.values(s).some((v) => q(v).includes(q(a.query))));
+      const limit = int(a.limit, 'limit', { min: 1, max: 400 }) ?? 50;
+      return { summary: fleetSummary(c), matches: list.length, ships: list.slice(0, limit) };
+    },
+  },
+  {
+    name: 'updateShip',
+    title: 'Update or register a ship',
+    description: 'Change a ship\'s status, owner, location, name, role, crew, Marines or notes the moment it changes (damage, capture, sale, renaming, refit). create: true registers a new hull (e.g. a capture or newly built ship).',
+    kind: 'write',
+    required: ['designation', 'reason'],
+    properties: {
+      designation: S('e.g. MRC-204, or a name for unnumbered ships'),
+      create: B('Register a new hull'),
+      name: S('Name'), owner: S('Owner'), relationship: S('e.g. MRC-owned, self-owned affiliate'), status: S('e.g. Operational, Damaged, Missing, Captured — title unresolved'),
+      role: S('Role / class'), location: S('Where it is'), crew: I('Ship crew'), marines: I('Marines'), notes: S('Notes'),
+      reason: S('What happened'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const reason = text(a.reason, 'reason', { required: true, max: 500 });
+      const r = updateShip(c, a);
+      const changed = Object.keys(a).filter((k) => !['campaignId', 'designation', 'create', 'reason'].includes(k));
+      emit('fleet', `${r.before ? 'Ship updated' : 'Ship registered'}: ${r.after.designation}${r.after.name ? ` ${r.after.name}` : ''} — ${changed.map((k) => `${k}: ${a[k]}`).join('; ')} (${reason})`, { designation: r.after.designation, changes: Object.fromEntries(changed.map((k) => [k, a[k]])) });
+      return r.after;
+    },
+  },
+  {
     name: 'recordEvent',
     title: 'Record a story event in the ledger',
     description: 'Permanently record a consequential non-dice outcome the moment it happens: decision, deal, money, discovery, scene outcome, XP-eligible milestone, canon fact or correction. Dice, HP, items and XP log themselves.',
@@ -843,6 +956,8 @@ const TOOLS = [
         characters: [brief(c.character), ...(c.party ?? []).map(brief)].filter(Boolean),
         combat: combatView(c),
         relationships: relationshipView(c),
+        ...(c.finances?.accounts?.length ? { finances: financeView(c, { full: false }), financeNote: 'Balances only; read getFinances before any money decision. Money moves only via postTransaction.' } : {}),
+        ...(c.fleet?.length ? { fleet: fleetSummary(c) } : {}),
         openThreads: (c.quests ?? []).filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, latest: q.progress.at(-1) ?? null })),
         dmNotes: c.notes,
         recentEvents: recent.map((e) => ({ seq: e.seq, at: e.at, type: e.type, summary: e.summary })),

@@ -16,6 +16,7 @@ Conversations forget; the server does not. Treat chat history as unreliable and 
 - Everything else that matters must be recorded THE MOMENT it happens with recordEvent: decisions, deals and their exact terms, money in or out, discoveries, NPC promises, scene outcomes, canon facts, and active achievements (xpEligible true, with participants). Use exact names and numbers. Mark pending things unresolved: true. Never batch these up for later.
 - In-game time passes ONLY through advanceTime (with a reason). Never narrate time passing without it. If the clock is unverified, ask the player before any time-sensitive play, then setClock.
 - Call checkpoint at the end of every scene and before the player leaves, with a factual summary and the current scene. This also mirrors everything to GitHub when configured.
+- Campaigns that run businesses keep books on the server: money moves ONLY through postTransaction (never narrate a payment, sale, wage or income without it), ownership changes through setHolding, ships through updateShip. Read getFinances before any money decision; never convert currencies without an agreed rate; recurring per-cycle income is posted only at a cycle close, line by line. Balances marked "reference" are the last documented figures, not verified statements: say so if it matters.
 - If the player corrects a fact, record a correction event; never silently change history.
 - Before an XP audit, accounting close or "what happened" question, read getLedger (filter by types) instead of recalling.
 
