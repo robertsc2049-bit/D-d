@@ -24,7 +24,8 @@ You (PC or phone)  ⇄  ChatGPT (the DM, via a plugin)  ⇄  Supabase Edge Funct
 - **Clock.** In-game time moves only through `advanceTime`. It refuses to pass the end of an accounting cycle unless the player agrees. `setClock` is for player-confirmed corrections.
 - **Resume.** `getHandoff` returns the exact clock, scene, every character's HP/XP/conditions, open threads and the latest events. The DM guide tells ChatGPT to resume only from this.
 - **Checkpoint.** `checkpoint` closes a scene and pushes to GitHub immediately.
-- **GitHub mirror.** A campaign with `mirror = {repo, branch, path}` is committed to that folder as `HANDOFF_LIVE.md`, `STATE.json` and `ledger/YYYY-MM.md`. Each sync is one fast-forward commit, and it never writes outside the folder. A database cron job (`solo-dnd-github-sync`, every 10 minutes) calls `POST .../sync/<access key>`. The mirror needs the Edge Function secret `GITHUB_TOKEN`: a fine-grained token for that one repo with **Contents: read and write**. Set it in Supabase → Edge Functions → Secrets. Without it the mirror just reports "skipped" and the ledger still works.
+- **Books.** Campaigns that run businesses keep accounts (never converted between currencies), recurring per-cycle lines, equity holdings and a fleet register on the server. Money moves only through `postTransaction`, which refuses implicit currency conversion and overdrafts. Every change is in the ledger.
+- **GitHub mirror.** A campaign with `mirror = {repo, branch, path}` is committed to that folder as `HANDOFF_LIVE.md`, `STATE.json`, `FINANCES.md`, `FLEET.md` and `ledger/YYYY-MM.md`. Each sync is one fast-forward commit, and it never writes outside the folder. A database cron job (`solo-dnd-github-sync`, every 10 minutes) calls `POST .../sync/<access key>`. The mirror needs the Edge Function secret `GITHUB_TOKEN`: a fine-grained token for that one repo with **Contents: read and write**. Set it in Supabase → Edge Functions → Secrets. Without it the mirror just reports "skipped" and the ledger still works.
 
 ## Connect ChatGPT (one time)
 
@@ -61,6 +62,7 @@ The function caches the key until it restarts, so the old URL can keep working f
 | Story | `addQuest`, `updateQuest`, `addNpc`, `updateNpc`, `addJournalEntry`, `getJournal` |
 | Combat | `startCombat` (with balance check), `getCombat`, `combatAttack`, `adjustCombatant`, `nextTurn`, `endCombat` |
 | Fidelity | `getHandoff`, `recordEvent`, `getLedger`, `advanceTime`, `setClock`, `checkpoint` |
+| Books | `getFinances`, `postTransaction`, `setAccount`, `setHolding`, `getFleet`, `updateShip` |
 
 ## Development
 
@@ -80,6 +82,7 @@ Layout:
 | `supabase/functions/solo-dnd/core/tools.js` | Tool definitions and handlers |
 | `supabase/functions/solo-dnd/core/game.js`, `rules.js`, `dice.js` | Rules engine |
 | `supabase/functions/solo-dnd/core/store.js` | Postgres storage + ledger via Supabase REST (plus in-memory store for tests) |
+| `supabase/functions/solo-dnd/core/ledgers.js` | Accounts, equity and fleet register |
 | `supabase/functions/solo-dnd/core/mirror.js` | GitHub mirror (Git Data API, one commit per sync) |
 | `supabase/migrations/` | Database schema |
 
