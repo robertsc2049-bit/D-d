@@ -6,6 +6,7 @@ A solo fantasy tabletop RPG where **ChatGPT is your Dungeon Master** and this sm
 - **Rules math.** Modifiers, proficiency, skills, saves, attacks against AC, crits, death saves, rests, XP and levelling (5e 2014 SRD rules).
 - **Saved campaigns.** Character sheet, inventory, gold, spell slots, quests, NPCs, combat state, secret DM notes and a journal live in a database. Play on your PC, continue on your phone.
 - **Solo balance.** Every fight gets a danger check for a single hero before round 1.
+- **No lost memory between chats.** Every change is written to an append-only, numbered **event ledger** as it happens. Each new conversation resumes from `getHandoff`, not from ChatGPT's memory. The ledger and live state are also committed to a GitHub folder automatically.
 
 ```
 You (PC or phone)  ⇄  ChatGPT (the DM, via a plugin)  ⇄  Supabase Edge Function (this repo)  ⇄  Postgres
@@ -14,8 +15,16 @@ You (PC or phone)  ⇄  ChatGPT (the DM, via a plugin)  ⇄  Supabase Edge Funct
 ## How it's hosted
 
 - **Supabase Edge Function** `solo-dnd`: always on, with one permanent URL. Nothing runs on your own devices.
-- **Supabase Postgres:** tables `campaigns` and `app_config`. Row level security is on with no policies, and public API roles have no privileges, so only the function (using its built-in service key) can read or write them.
+- **Supabase Postgres:** tables `campaigns`, `events` (the ledger), `mirror_state` and `app_config`. Row level security is on with no policies, and public API roles have no privileges, so only the function (using its built-in service key) can read or write them.
 - **Hidden from the public.** The only working address is `.../mcp/<secret key>`. Every other path, and any wrong key, returns a bare `404 Not found` with `noindex` headers. There is no web page and nothing to discover.
+
+## Fidelity: ledger, clock and GitHub mirror
+
+- **Ledger.** Dice, checks, HP, items, XP, combat and clock changes record themselves. ChatGPT records story facts with `recordEvent` the moment they happen: decisions, deals, money, discoveries and XP-eligible milestones. Each save and its ledger events are written in one database transaction, so state and ledger always agree.
+- **Clock.** In-game time moves only through `advanceTime`. It refuses to pass the end of an accounting cycle unless the player agrees. `setClock` is for player-confirmed corrections.
+- **Resume.** `getHandoff` returns the exact clock, scene, every character's HP/XP/conditions, open threads and the latest events. The DM guide tells ChatGPT to resume only from this.
+- **Checkpoint.** `checkpoint` closes a scene and pushes to GitHub immediately.
+- **GitHub mirror.** A campaign with `mirror = {repo, branch, path}` is committed to that folder as `HANDOFF_LIVE.md`, `STATE.json` and `ledger/YYYY-MM.md`. Each sync is one fast-forward commit, and it never writes outside the folder. A database cron job (`solo-dnd-github-sync`, every 10 minutes) calls `POST .../sync/<access key>`. The mirror needs the Edge Function secret `GITHUB_TOKEN`: a fine-grained token for that one repo with **Contents: read and write**. Set it in Supabase → Edge Functions → Secrets. Without it the mirror just reports "skipped" and the ledger still works.
 
 ## Connect ChatGPT (one time)
 
@@ -51,6 +60,7 @@ The function caches the key until it restarts, so the old URL can keep working f
 | Dice | `rollDice` (`1d20+5`, `8d6`, `4d6kh3`, advantage), `makeCheck` (skills, saves, attacks, initiative, death saves) |
 | Story | `addQuest`, `updateQuest`, `addNpc`, `updateNpc`, `addJournalEntry`, `getJournal` |
 | Combat | `startCombat` (with balance check), `getCombat`, `combatAttack`, `adjustCombatant`, `nextTurn`, `endCombat` |
+| Fidelity | `getHandoff`, `recordEvent`, `getLedger`, `advanceTime`, `setClock`, `checkpoint` |
 
 ## Development
 
@@ -69,7 +79,8 @@ Layout:
 | `supabase/functions/solo-dnd/core/handler.js` | MCP over HTTP (stateless JSON), routing, hiding |
 | `supabase/functions/solo-dnd/core/tools.js` | Tool definitions and handlers |
 | `supabase/functions/solo-dnd/core/game.js`, `rules.js`, `dice.js` | Rules engine |
-| `supabase/functions/solo-dnd/core/store.js` | Postgres storage via Supabase REST (plus in-memory store for tests) |
+| `supabase/functions/solo-dnd/core/store.js` | Postgres storage + ledger via Supabase REST (plus in-memory store for tests) |
+| `supabase/functions/solo-dnd/core/mirror.js` | GitHub mirror (Git Data API, one commit per sync) |
 | `supabase/migrations/` | Database schema |
 
 The core is plain JavaScript that runs on both Deno (Supabase) and Node (tests).
