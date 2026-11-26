@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { roll, rollD20, setDieRoller, DiceError } from '../src/dice.js';
+import { roll, rollD20, setDieRoller, DiceError } from '../supabase/functions/solo-dnd/core/dice.js';
 
 test('parses and totals expressions', () => {
   const restore = setDieRoller((sides) => sides); // always max

@@ -1,9 +1,8 @@
-import { roll, rollD20, dieRoll, validateExpression, DiceError } from './dice.js';
+import { roll, rollD20, dieRoll, validateExpression, DiceError, newId } from './dice.js';
 import {
   ABILITIES, SKILLS, CLASSES, XP_THRESHOLDS, abilityMod, proficiencyBonus, levelForXp, normalizeKey,
   normalizeAbility, averageMaxHp,
 } from './rules.js';
-import { newId } from './store.js';
 
 export class HttpError extends Error {
   constructor(status, message) {

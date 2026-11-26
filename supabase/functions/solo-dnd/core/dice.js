@@ -1,12 +1,30 @@
-import { randomInt } from 'node:crypto';
 
 export class DiceError extends Error {}
 
 const MAX_DICE = 100;
 const MAX_SIDES = 1000;
 
-// Cryptographically fair die: integer in [1, sides].
-let rollDie = (sides) => randomInt(1, sides + 1);
+// Cryptographically fair die: integer in [1, sides], using Web Crypto (works in Deno and Node).
+// Rejection sampling avoids modulo bias.
+function secureDie(sides) {
+  const limit = Math.floor(0x100000000 / sides) * sides;
+  const buf = new Uint32Array(1);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < limit) return (buf[0] % sides) + 1;
+  }
+}
+
+/** Random lowercase hex string with the given number of bytes of entropy. */
+export function randomHex(bytes) {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export const newId = (prefix) => `${prefix}_${randomHex(4)}`;
+
+let rollDie = secureDie;
 
 /** Test hook: replace the random source. Returns a function that restores it. */
 export function setDieRoller(fn) {

@@ -1,0 +1,4 @@
+# Minimal Supabase CLI config for this repo.
+[functions.solo-dnd]
+# The function authenticates with the secret key in its URL, not a Supabase JWT.
+verify_jwt = false
