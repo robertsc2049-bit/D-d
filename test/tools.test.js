@@ -204,3 +204,84 @@ test('Elias (level 18 Mastermind) matches the campaign repo numbers', async () =
   const atk = await withDice(10, () => callTool('makeCheck', { campaignId: camp.id, kind: 'attack', ability: 'dex' }, ctx));
   assert.equal(atk.data.total, 21);
 });
+
+test('party: members get full sheets, own checks, combat turns and XP shares', async () => {
+  const store = new MemoryStore();
+  const ctx = { store };
+  const ok = async (name, args) => {
+    const r = await callTool(name, args, ctx);
+    assert.ok(r.ok, `${name}: ${r.error}`);
+    return r.data;
+  };
+  const camp = await ok('createCampaign', { name: 'Party' });
+  const id = camp.id;
+  await ok('createCharacter', { campaignId: id, name: 'Elias', class: 'rogue', level: 18, abilityScores: { str: 8, dex: 20, con: 12, int: 12, wis: 10, cha: 20 }, armorClass: 17 });
+  // Lysa and Fen exactly as recorded in CREW_AND_MECHANICS.json
+  const lysa = await ok('createCharacter', {
+    campaignId: id, partyMember: true, name: 'Lysa Renn', class: 'rogue', subclass: 'Thief', level: 17, xp: 231500,
+    abilityScores: { str: 8, dex: 20, con: 14, int: 12, wis: 16, cha: 12 }, armorClass: 17, maxHp: 122,
+    savingThrowProficiencies: ['dex', 'int', 'wis'], reliableTalent: true, initiativeBonus: 5,
+    expertise: ['stealth', 'investigation', 'insight', 'perception'], skillProficiencies: ['acrobatics', 'sleight_of_hand', 'deception', 'survival'],
+  });
+  assert.equal(lysa.id, 'lysa-renn');
+  assert.equal(lysa.derived.initiative, '+10');
+  assert.equal(lysa.derived.passivePerception, 25);
+  assert.deepEqual([lysa.derived.skills.stealth, lysa.derived.skills.investigation, lysa.derived.skills.deception, lysa.derived.savingThrows.wis], ['+17', '+13', '+7', '+9']);
+  const fen = await ok('createCharacter', {
+    campaignId: id, partyMember: true, name: 'Halric Fen', class: 'rogue', level: 17, abilityScores: { str: 8, dex: 16, con: 12, int: 20, wis: 20, cha: 10 },
+    armorClass: 15, maxHp: 105, savingThrowProficiencies: ['dex', 'int', 'wis'], passiveBonus: 5,
+    expertise: ['investigation', 'history', 'insight', 'perception'], skillProficiencies: ['persuasion', 'sleight_of_hand'],
+  });
+  assert.equal(fen.derived.passivePerception, 32);
+  assert.equal(fen.derived.passiveInvestigation, 32);
+
+  // Checks by characterId, and unknown ids are rejected
+  const chk = await withDice(10, () => ok('makeCheck', { campaignId: id, characterId: 'halric-fen', kind: 'skill', skill: 'history' }));
+  assert.equal(chk.character, 'Halric Fen');
+  assert.equal(chk.total, 27);
+  assert.match((await callTool('makeCheck', { campaignId: id, characterId: 'nobody', kind: 'ability', ability: 'str' }, ctx)).error, /lysa-renn/);
+  const lead = await withDice(10, () => ok('makeCheck', { campaignId: id, kind: 'save', ability: 'dex' }));
+  assert.equal(lead.character, 'Elias');
+
+  // Combat with the whole party: initiative order: Elias 20+5, Lysa 19+10, Fen 1+3, goblin 2+2
+  const seq = [20, 19, 1, 2];
+  let r = await withDice(() => seq.shift() ?? 10, () => ok('startCombat', {
+    campaignId: id, includeParty: true,
+    enemies: [{ name: 'Goblin', armorClass: 13, maxHp: 30, xp: 300, attacks: [{ name: 'Blade', toHit: 4, damage: '1d6+2' }] }],
+  }));
+  assert.deepEqual(r.initiativeOrder.map((x) => x.id).slice(0, 2), ['lysa-renn', 'player']);
+  assert.equal(r.balanceCheck.heroes, 3);
+  const goblin = r.initiativeOrder.find((x) => x.side === 'enemy');
+
+  // Lysa attacks with her own DEX and proficiency: d20 10 + 5 + 6 = 21
+  r = await withDice((s) => (s === 20 ? 10 : 6), () => ok('combatAttack', { campaignId: id, attackerId: 'lysa-renn', targetId: goblin.id, ability: 'dex', damageDice: '1d6' }));
+  assert.equal(r.total, 21);
+  assert.equal(r.damageDealt, 11);
+
+  // Goblin crits Fen; damage lands on Fen's sheet, not Elias's
+  r = await withDice((s) => (s === 20 ? 20 : 6), () => ok('combatAttack', { campaignId: id, attackerId: goblin.id, targetId: 'halric-fen' }));
+  assert.equal(r.targetStatus.hp, 105 - 14);
+  const state = await ok('getCampaign', { campaignId: id });
+  assert.equal(state.party.find((p) => p.id === 'halric-fen').hp, 91);
+  assert.equal(state.character.hp, state.character.maxHp);
+
+  await ok('adjustCombatant', { campaignId: id, combatantId: goblin.id, type: 'damage', amount: 99 });
+  r = await ok('endCombat', { campaignId: id });
+  assert.equal(r.totalXp, 300);
+  assert.equal(r.xpByCharacter['lysa-renn'].awarded, 100);
+  assert.equal(r.xpByCharacter.player.awarded, 100);
+  assert.equal(r.party.length, 3);
+
+  // Per-character rest, HP and inventory
+  await ok('rest', { campaignId: id, characterId: 'halric-fen', type: 'long' });
+  assert.equal((await ok('getCampaign', { campaignId: id })).party.find((p) => p.id === 'halric-fen').hp, 105);
+  const inv = await ok('manageInventory', { campaignId: id, characterId: 'lysa-renn', action: 'add', name: 'Klingon cloak' });
+  assert.equal(inv.inventory.length, 1);
+  assert.equal((await ok('getCampaign', { campaignId: id })).character.inventory.length, 0);
+
+  // Party members can join a running fight
+  await ok('startCombat', { campaignId: id, enemies: [{ name: 'Drone', armorClass: 12, maxHp: 5 }] });
+  r = await ok('startCombat', { campaignId: id, addToExisting: true, partyMembers: ['halric-fen'] });
+  assert.ok(r.initiativeOrder.some((x) => x.id === 'halric-fen'));
+  assert.ok(!r.initiativeOrder.some((x) => x.id === 'lysa-renn'));
+});

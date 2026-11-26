@@ -48,6 +48,7 @@ function campaignSummary(c) {
     id: c.id,
     name: c.name,
     character: c.character ? `${c.character.name}, level ${c.character.level} ${c.character.race} ${c.character.class}` : null,
+    party: (c.party ?? []).map((p) => `${p.name} (${p.id}), level ${p.level} ${p.class}`),
     location: c.location,
     updatedAt: c.updatedAt,
   };
@@ -63,6 +64,7 @@ function campaignView(c, journal = 10) {
     inGameDate: c.inGameDate,
     dmNotes: c.notes,
     character: describeCharacter(c.character),
+    party: (c.party ?? []).map(describeCharacter),
     quests: c.quests,
     npcs: c.npcs,
     combat: combatView(c),
@@ -74,10 +76,19 @@ function campaignView(c, journal = 10) {
   };
 }
 
-function needCharacter(c) {
+/** The lead character ("player", default) or a party member by id or name. */
+function needCharacter(c, a = {}) {
   if (!c.character) throw bad('This campaign has no character yet. Create one with createCharacter.');
-  return c.character;
+  const id = a.characterId;
+  if (id === undefined || id === null || id === '' || id === 'player') return c.character;
+  const key = String(id).toLowerCase();
+  if (c.character.name.toLowerCase() === key) return c.character;
+  const m = (c.party ?? []).find((p) => p.id === id || p.name.toLowerCase() === key);
+  if (!m) throw new HttpError(404, `No character "${id}". Use "player" or a party id: ${(c.party ?? []).map((p) => p.id).join(', ') || 'none'}.`);
+  return m;
 }
+
+const slug = (name) => name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'member';
 
 function doRoll(a) {
   const count = int(a.count, 'count', { min: 1, max: 20 }) ?? 1;
@@ -193,11 +204,12 @@ const TOOLS = [
   {
     name: 'createCharacter',
     title: 'Create the player character',
-    description: 'Create (or replace) the player character. The server computes modifiers, proficiency, HP, saves and skill bonuses; saving throw proficiencies default from class.',
+    description: 'Create (or replace) the lead character, or with partyMember true add/replace a playable party member (gets an id for characterId). Server computes modifiers, proficiency, HP, saves and skills.',
     kind: 'write',
     required: ['name', 'class', 'abilityScores'],
     properties: {
       name: S('Character name'),
+      partyMember: B('Add as an additional playable party member instead of replacing the lead character'),
       race: S('e.g. Elf, Dwarf, Human'),
       class: S('e.g. fighter, wizard, rogue'),
       subclass: S('Optional'),
@@ -214,6 +226,8 @@ const TOOLS = [
       checkBonus: I('Standing bonus to every ability check incl. skills and initiative, e.g. 1 for a Stone of Good Luck'),
       saveBonus: I('Standing bonus to every saving throw, e.g. 1 for a Stone of Good Luck'),
       reliableTalent: B('Rogue 11+ Reliable Talent: proficient skill checks treat a d20 of 9 or lower as 10'),
+      initiativeBonus: I('Extra initiative bonus from feats/items, e.g. 5 for Alert'),
+      passiveBonus: I('Extra bonus to passive Perception and Investigation, e.g. 5 for Observant'),
       maxHp: I('Override computed max HP.'),
       speed: I('Default 30'),
       skillProficiencies: list('e.g. ["stealth","perception"]'),
@@ -229,8 +243,22 @@ const TOOLS = [
       backstory: S('Backstory'),
     },
     run: async (a, { campaign: c }) => {
-      c.character = buildCharacter(a);
-      return describeCharacter(c.character);
+      const ch = buildCharacter(a);
+      if (!a.partyMember) {
+        c.character = { ...ch, id: 'player' };
+        return describeCharacter(c.character);
+      }
+      if (!c.character) throw bad('Create the lead character first, then add party members.');
+      c.party = c.party ?? [];
+      const id = slug(ch.name);
+      const existing = c.party.findIndex((p) => p.id === id);
+      const member = { ...ch, id };
+      if (existing >= 0) c.party[existing] = member;
+      else {
+        if (c.party.length >= 12) throw bad('At most 12 party members.');
+        c.party.push(member);
+      }
+      return describeCharacter(member);
     },
   },
   {
@@ -245,6 +273,8 @@ const TOOLS = [
       checkBonus: I('Standing bonus to every ability check incl. skills and initiative, e.g. 1 for a Stone of Good Luck'),
       saveBonus: I('Standing bonus to every saving throw, e.g. 1 for a Stone of Good Luck'),
       reliableTalent: B('Rogue 11+ Reliable Talent: proficient skill checks treat a d20 of 9 or lower as 10'),
+      initiativeBonus: I('Extra initiative bonus from feats/items, e.g. 5 for Alert'),
+      passiveBonus: I('Extra bonus to passive Perception and Investigation, e.g. 5 for Observant'),
       skillProficiencies: list('Full replacement list'), expertise: list('Full replacement list'),
       savingThrowProficiencies: list('Full replacement list'),
       features: list('Full replacement list'), addFeature: S('Append one feature'),
@@ -258,7 +288,7 @@ const TOOLS = [
       conditions: list('Full replacement list'), addCondition: S('e.g. poisoned'), removeCondition: S('e.g. poisoned'),
       personality: S('Personality'), backstory: S('Backstory'),
     },
-    run: async (a, { campaign: c }) => describeCharacter(updateCharacter(needCharacter(c), a)),
+    run: async (a, { campaign: c }) => describeCharacter(updateCharacter(needCharacter(c, a), a)),
   },
   {
     name: 'changeHp',
@@ -273,7 +303,7 @@ const TOOLS = [
       reason: S('e.g. "fell into a pit"'),
     },
     run: async (a, { campaign: c }) => {
-      const ch = needCharacter(c);
+      const ch = needCharacter(c, a);
       const type = a.type ?? 'damage';
       if (!['damage', 'heal', 'temp'].includes(type)) throw bad('"type" must be damage, heal or temp.');
       const amount = int(a.amount, 'amount', { required: true, min: 0, max: 10000 });
@@ -289,7 +319,7 @@ const TOOLS = [
     required: ['type'],
     properties: { type: { type: 'string', enum: ['short', 'long'] }, hitDiceToSpend: I('Short rest only', { minimum: 0 }) },
     run: async (a, { campaign: c }) => {
-      const ch = needCharacter(c);
+      const ch = needCharacter(c, a);
       if (c.combat) throw bad('You cannot rest during combat. End combat first.');
       if (a.type !== 'short' && a.type !== 'long') throw bad('"type" must be "short" or "long".');
       return rest(ch, { type: a.type, hitDiceToSpend: int(a.hitDiceToSpend, 'hitDiceToSpend', { min: 0, max: 20 }) ?? 0 });
@@ -303,7 +333,7 @@ const TOOLS = [
     required: ['amount'],
     properties: { amount: I('XP', { minimum: 0 }), reason: S('Why') },
     run: async (a, { campaign: c }) => {
-      const r = awardXp(needCharacter(c), int(a.amount, 'amount', { required: true, min: 0, max: 1000000 }));
+      const r = awardXp(needCharacter(c, a), int(a.amount, 'amount', { required: true, min: 0, max: 1000000 }));
       if (a.reason) r.reason = text(a.reason, 'reason', { max: 200 });
       return r;
     },
@@ -317,7 +347,8 @@ const TOOLS = [
     run: async (a, { campaign: c }) => {
       const hpMethod = a.hpMethod ?? 'average';
       if (!['average', 'roll'].includes(hpMethod)) throw bad('"hpMethod" must be "average" or "roll".');
-      return { ...levelUp(needCharacter(c), { hpMethod }), character: describeCharacter(c.character) };
+      const ch = needCharacter(c, a);
+      return { ...levelUp(ch, { hpMethod }), character: describeCharacter(ch) };
     },
   },
   {
@@ -334,7 +365,7 @@ const TOOLS = [
       equipped: B('Equip when adding'),
     },
     run: async (a, { campaign: c }) => {
-      const ch = needCharacter(c);
+      const ch = needCharacter(c, a);
       const action = a.action ?? 'add';
       let item;
       if (action === 'add') item = addItem(ch, a);
@@ -368,7 +399,7 @@ const TOOLS = [
   {
     name: 'makeCheck',
     title: 'Roll a check for the character',
-    description: 'Roll a skill check, ability check, saving throw, attack, initiative or death save for the player character using their sheet. Give a DC to get success/failure.',
+    description: 'Roll a skill check, ability check, saving throw, attack, initiative or death save for the lead character or a party member (characterId), using their sheet. Give a DC for success/failure.',
     kind: 'write',
     required: ['kind'],
     properties: {
@@ -383,7 +414,8 @@ const TOOLS = [
       reason: S('What the check is for'),
     },
     run: async (a, { campaign: c }) => {
-      const r = characterCheck(needCharacter(c), a);
+      const ch = needCharacter(c, a);
+      const r = { character: ch.name, ...characterCheck(ch, a) };
       if (a.reason) r.reason = text(a.reason, 'reason', { max: 200 });
       logRoll(c, { reason: r.reason ?? r.label ?? r.kind, result: r.total ?? r.d20?.natural, success: r.success });
       return r;
@@ -517,11 +549,13 @@ const TOOLS = [
   {
     name: 'startCombat',
     title: 'Start combat',
-    description: 'Start an encounter: enemies (and optional allies) with AC, HP, attacks, XP. Rolls initiative for all. Returns balanceCheck: obey its advice before round 1. addToExisting adds reinforcements.',
+    description: 'Start an encounter: enemies (plus party members and NPC allies) with AC, HP, attacks, XP. Rolls initiative for all. Returns balanceCheck: obey it before round 1. addToExisting adds reinforcements.',
     kind: 'write',
     required: ['enemies'],
     properties: {
-      enemies: { type: 'array', items: combatantSchema },
+      enemies: { type: 'array', items: combatantSchema, description: 'Foes. May be empty only when addToExisting just adds party members.' },
+      includeParty: B('Every playable party member joins the fight alongside the lead'),
+      partyMembers: list('Ids of the party members who join (from getCampaign party)'),
       allies: { type: 'array', items: combatantSchema, description: 'Friendly NPCs/companions fighting alongside' },
       playerInitiative: I('Use if the player rolled initiative themselves'),
       playerInitiativeBonus: I('Extra initiative bonus (e.g. Alert feat)'),
@@ -540,7 +574,7 @@ const TOOLS = [
   {
     name: 'combatAttack',
     title: 'Resolve an attack',
-    description: 'Roll an attack between combatants (ids from combat state; the player is "player"). Rolls to hit vs AC, rolls damage (crits doubled) and applies it. Player attacks need damageDice or damage.',
+    description: 'Roll an attack between combatants (ids from combat state; lead is "player", party members use their id). Rolls to hit vs AC, rolls damage (crits doubled), applies it. Hero attacks need damageDice or damage.',
     kind: 'write',
     required: ['attackerId', 'targetId'],
     properties: {
@@ -593,11 +627,15 @@ const TOOLS = [
   },
 ];
 
+const PER_CHARACTER = new Set(['updateCharacter', 'changeHp', 'rest', 'awardXp', 'levelUp', 'manageInventory', 'makeCheck']);
+const characterId = S('Which character: "player" (default: the lead) or a party member id/name from getCampaign.party');
+
 /** Tool definitions in MCP format. */
 export function listTools() {
   return TOOLS.map((t) => {
     const needsCampaign = t.kind !== 'global';
-    const properties = needsCampaign ? { campaignId, ...t.properties } : t.properties;
+    const perCharacter = PER_CHARACTER.has(t.name) ? { characterId } : {};
+    const properties = needsCampaign ? { campaignId, ...perCharacter, ...t.properties } : t.properties;
     const required = [...(needsCampaign ? ['campaignId'] : []), ...(t.required ?? [])];
     return {
       name: t.name,

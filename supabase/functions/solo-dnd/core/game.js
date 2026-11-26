@@ -156,6 +156,8 @@ export function buildCharacter(body) {
     checkBonus: int(body.checkBonus, 'checkBonus', { min: -10, max: 10 }) ?? 0,
     saveBonus: int(body.saveBonus, 'saveBonus', { min: -10, max: 10 }) ?? 0,
     reliableTalent: Boolean(body.reliableTalent),
+    initiativeBonus: int(body.initiativeBonus, 'initiativeBonus', { min: -10, max: 20 }) ?? 0,
+    passiveBonus: int(body.passiveBonus, 'passiveBonus', { min: -10, max: 20 }) ?? 0,
     inspiration: false,
     deathSaves: { successes: 0, failures: 0 },
     dead: false,
@@ -208,6 +210,8 @@ export function updateCharacter(c, body) {
   if (body.checkBonus !== undefined) c.checkBonus = int(body.checkBonus, 'checkBonus', { required: true, min: -10, max: 10 });
   if (body.saveBonus !== undefined) c.saveBonus = int(body.saveBonus, 'saveBonus', { required: true, min: -10, max: 10 });
   if (body.reliableTalent !== undefined) c.reliableTalent = Boolean(body.reliableTalent);
+  if (body.initiativeBonus !== undefined) c.initiativeBonus = int(body.initiativeBonus, 'initiativeBonus', { required: true, min: -10, max: 20 });
+  if (body.passiveBonus !== undefined) c.passiveBonus = int(body.passiveBonus, 'passiveBonus', { required: true, min: -10, max: 20 });
   if (body.conditions !== undefined) c.conditions = (textList(body.conditions, 'conditions') ?? []).map(normalizeKey);
   if (body.addCondition !== undefined) {
     const cond = normalizeKey(text(body.addCondition, 'addCondition', { required: true, max: 60 }));
@@ -435,7 +439,8 @@ export function characterCheck(c, body) {
   }
 
   // Standing bonuses from the sheet: checkBonus on ability checks (incl. skills, initiative), saveBonus on saves.
-  const standing = kind === 'save' ? c.saveBonus ?? 0 : kind === 'attack' ? 0 : c.checkBonus ?? 0;
+  const standing = (kind === 'save' ? c.saveBonus ?? 0 : kind === 'attack' ? 0 : c.checkBonus ?? 0)
+    + (kind === 'initiative' ? c.initiativeBonus ?? 0 : 0);
   if (standing) parts.itemBonus = standing;
   if (extra) parts.bonus = extra;
   modifier += standing + extra;
@@ -527,6 +532,44 @@ function sortOrder(combat) {
   });
 }
 
+// ---------- party ----------
+
+/** The character sheet behind a player-side combatant: the lead ("player") or a party member. */
+export function charFor(campaign, combatant) {
+  if (combatant.characterId && combatant.characterId !== 'player') {
+    const m = (campaign.party ?? []).find((p) => p.id === combatant.characterId);
+    if (m) return m;
+  }
+  return campaign.character;
+}
+
+const heroesIn = (combat) => combat.combatants.filter((x) => x.side === 'player');
+
+function heroCombatant(campaign, ch, id, extraInit = 0) {
+  return {
+    id,
+    characterId: id,
+    name: ch.name,
+    side: 'player',
+    initiativeBonus: abilityMod(ch.abilityScores.dex) + (ch.checkBonus ?? 0) + (ch.initiativeBonus ?? 0) + extraInit,
+    conditions: [],
+  };
+}
+
+function partyFromBody(campaign, body) {
+  const party = campaign.party ?? [];
+  let ids = [];
+  if (body.includeParty) ids = party.map((p) => p.id);
+  if (Array.isArray(body.partyMembers)) ids = [...new Set([...ids, ...body.partyMembers.map(String)])];
+  return ids.map((id) => {
+    const key = id.toLowerCase();
+    const m = party.find((p) => p.id === id || p.name.toLowerCase() === key);
+    if (!m) throw new HttpError(404, `No party member "${id}". Party ids: ${party.map((p) => p.id).join(', ') || 'none'}.`);
+    if (m.dead) throw bad(`${m.name} is dead and cannot join combat.`);
+    return m;
+  });
+}
+
 // ---------- solo balance ----------
 
 // Rough XP budgets for a *single* character (per-level guide, tuned toward the gentle side).
@@ -544,7 +587,10 @@ function averageDamage(expr, critical = false) {
 
 /** Estimate how dangerous the active enemies are for one character, so the DM can adjust before round 1. */
 export function balanceCheck(campaign) {
-  const c = campaign.character;
+  const heroes = heroesIn(campaign.combat).map((h) => charFor(campaign, h));
+  // Judge danger against the most fragile hero; scale the XP budget by party size.
+  const c = heroes.reduce((a, b) => (b.hp < a.hp ? b : a), heroes[0] ?? campaign.character);
+  const partySize = Math.max(1, heroes.length);
   const foes = campaign.combat.combatants.filter((x) => x.side === 'enemy' && !x.defeated);
   const allies = campaign.combat.combatants.filter((x) => x.side === 'ally' && !x.defeated).length;
   const rawXp = foes.reduce((sum, f) => sum + f.xp, 0);
@@ -552,42 +598,45 @@ export function balanceCheck(campaign) {
   const multiplier = n <= 1 ? 1 : n === 2 ? 1.5 : n <= 6 ? 2 : n <= 10 ? 2.5 : 3;
   const adjustedXp = Math.round(rawXp * multiplier);
   const lvl = Math.min(20, c.level) - 1;
-  const rating = adjustedXp > SOLO_BUDGET.deadly[lvl] ? 'deadly'
-    : adjustedXp > SOLO_BUDGET.tough[lvl] ? 'hard'
-      : adjustedXp > SOLO_BUDGET.routine[lvl] ? 'tough' : 'routine';
+  const budget = (k) => SOLO_BUDGET[k][lvl] * partySize;
+  const rating = adjustedXp > budget('deadly') ? 'deadly'
+    : adjustedXp > budget('tough') ? 'hard'
+      : adjustedXp > budget('routine') ? 'tough' : 'routine';
 
   // Worst case for one round: every foe hits with its strongest attack, on average damage.
   const worstRound = Math.round(foes.reduce((sum, f) => sum + Math.max(0, ...f.attacks.map((a) => averageDamage(a.damage))), 0));
   const biggestHit = Math.round(Math.max(0, ...foes.flatMap((f) => f.attacks.map((a) => averageDamage(a.damage, true)))));
   const warnings = [];
-  if (rating === 'deadly') warnings.push('Encounter XP is far above a solo budget. Remove foes, weaken them, or give the player a clear escape/parley option.');
+  if (rating === 'deadly') warnings.push('Encounter XP is far above the budget for this party. Remove foes, weaken them, or give the player a clear escape/parley option.');
   if (worstRound >= c.hp) warnings.push(`If every foe hits this round they average ${worstRound} damage, which would drop ${c.name} (${c.hp} HP) in one round.`);
   else if (worstRound > c.maxHp / 2) warnings.push(`One bad round averages ${worstRound} damage, more than half of ${c.name}'s max HP.`);
   if (biggestHit >= c.maxHp && c.level <= 4) warnings.push(`A single critical hit (~${biggestHit}) could take ${c.name} from full HP to 0.`);
-  if (n > 3 && allies === 0) warnings.push(`${n} enemies against one hero: action economy heavily favours the foes. Consider fewer foes or an ally.`);
+  if (n > 3 * partySize && allies === 0) warnings.push(`${n} enemies against ${partySize} hero(es): action economy heavily favours the foes. Consider fewer foes or an ally.`);
   if (!foes.some((f) => f.xp > 0)) warnings.push('No enemy has an xp value, so the difficulty rating is unreliable.');
 
   return {
     rating,
     enemyXp: rawXp,
     adjustedXp,
-    soloBudget: { routine: SOLO_BUDGET.routine[lvl], tough: SOLO_BUDGET.tough[lvl], deadly: SOLO_BUDGET.deadly[lvl] },
+    heroes: partySize,
+    xpBudget: { routine: budget('routine'), tough: budget('tough'), deadly: budget('deadly') },
     worstCaseRoundDamage: worstRound,
     characterHp: `${c.hp}/${c.maxHp}`,
     warnings,
     advice: rating === 'deadly' || worstRound >= c.hp
-      ? 'Too dangerous for a solo hero. Before narrating round 1, fix it: remove or weaken foes with adjustCombatant, add an ally, or turn it into a parley/chase with a clear escape.'
+      ? 'Too dangerous for this party. Before narrating round 1, fix it: remove or weaken foes with adjustCombatant, add an ally, or turn it into a parley/chase with a clear escape.'
       : warnings.length
         ? 'Fair but risky. Fine to run; have enemies fight smart but not cruelly, and let them flee or surrender when bloodied.'
-        : 'Balance looks fair for a solo hero.',
+        : 'Balance looks fair for this party.',
   };
 }
 
 export function startCombat(campaign, body) {
   const c = campaign.character;
   if (!c) throw bad('Create a character before starting combat.');
-  const enemies = body.enemies;
-  if (!Array.isArray(enemies) || enemies.length === 0) throw bad('"enemies" must be a non-empty list.');
+  const enemies = body.enemies ?? [];
+  if (!Array.isArray(enemies)) throw bad('"enemies" must be a list.');
+  if (enemies.length === 0 && !(campaign.combat && body.addToExisting)) throw bad('"enemies" must be a non-empty list.');
   const newcomers = [
     ...enemies.flatMap((e, i) => buildCombatant(e, 'enemy', i)),
     ...(Array.isArray(body.allies) ? body.allies.flatMap((a, i) => buildCombatant(a, 'ally', i)) : []),
@@ -597,7 +646,10 @@ export function startCombat(campaign, body) {
   if (campaign.combat) {
     if (!body.addToExisting) throw bad('Combat is already running. Pass "addToExisting": true to add reinforcements, or end it first.');
     const current = campaign.combat.order[campaign.combat.turnIndex];
-    for (const n of newcomers) {
+    const joining = partyFromBody(campaign, body)
+      .filter((m) => !campaign.combat.combatants.some((x) => x.characterId === m.id))
+      .map((m) => heroCombatant(campaign, m, m.id));
+    for (const n of [...newcomers, ...joining]) {
       rollInitiativeFor(n);
       campaign.combat.combatants.push(n);
       campaign.combat.order.push(n.id);
@@ -607,14 +659,9 @@ export function startCombat(campaign, body) {
     return { ...combatView(campaign), balanceCheck: balanceCheck(campaign) };
   }
 
-  const player = {
-    id: 'player',
-    name: c.name,
-    side: 'player',
-    initiativeBonus: abilityMod(c.abilityScores.dex) + (c.checkBonus ?? 0) + (int(body.playerInitiativeBonus, 'playerInitiativeBonus', { min: -10, max: 20 }) ?? 0),
-    conditions: [],
-  };
-  const all = [player, ...newcomers];
+  const player = heroCombatant(campaign, c, 'player', int(body.playerInitiativeBonus, 'playerInitiativeBonus', { min: -10, max: 20 }) ?? 0);
+  const members = partyFromBody(campaign, body).map((m) => heroCombatant(campaign, m, m.id));
+  const all = [player, ...members, ...newcomers];
   all.forEach(rollInitiativeFor);
   if (body.playerInitiative !== undefined) {
     player.initiative = int(body.playerInitiative, 'playerInitiative', { min: -10, max: 50 });
@@ -645,7 +692,10 @@ function findCombatant(combat, id, label) {
 }
 
 function combatantHp(campaign, combatant) {
-  if (combatant.side === 'player') return { hp: campaign.character.hp, maxHp: campaign.character.maxHp, armorClass: campaign.character.armorClass };
+  if (combatant.side === 'player') {
+    const ch = charFor(campaign, combatant);
+    return { hp: ch.hp, maxHp: ch.maxHp, armorClass: ch.armorClass };
+  }
   return { hp: combatant.hp, maxHp: combatant.maxHp, armorClass: combatant.armorClass };
 }
 
@@ -654,13 +704,13 @@ export function combatView(campaign) {
   if (!combat) return null;
   const currentId = combat.order[combat.turnIndex];
   const current = combat.combatants.find((x) => x.id === currentId);
-  const ch = campaign.character;
   return {
     round: combat.round,
     currentTurn: { id: current.id, name: current.name, side: current.side },
     initiativeOrder: combat.order.map((id) => {
       const x = combat.combatants.find((y) => y.id === id);
-      const status = x.side === 'player'
+      const ch = x.side === 'player' ? charFor(campaign, x) : null;
+      const status = ch
         ? { hp: ch.hp, maxHp: ch.maxHp, tempHp: ch.tempHp, armorClass: ch.armorClass, conditions: ch.conditions, dead: ch.dead }
         : { hp: x.hp, maxHp: x.maxHp, armorClass: x.armorClass, conditions: x.conditions, defeated: x.defeated, attacks: x.attacks, notes: x.notes };
       return { id: x.id, name: x.name, side: x.side, initiative: x.initiative, ...status };
@@ -672,7 +722,7 @@ export function combatView(campaign) {
 
 function applyDamageToCombatant(campaign, target, { type, amount, critical }) {
   if (target.side === 'player') {
-    const r = changeCharacterHp(campaign.character, { type, amount, critical });
+    const r = changeCharacterHp(charFor(campaign, target), { type, amount, critical });
     return { hp: r.after.hp, maxHp: r.after.maxHp, notes: r.notes, dead: r.dead };
   }
   const notes = [];
@@ -703,7 +753,7 @@ export function combatAttack(campaign, body) {
   const target = findCombatant(combat, body.targetId, 'targetId');
   if (target.side !== 'player' && target.defeated) throw bad(`${target.name} is already defeated.`);
   const mode = advantageMode(body.advantage);
-  const ch = campaign.character;
+  const ch = attacker.side === 'player' ? charFor(campaign, attacker) : null;
 
   let toHit;
   let damageExpr;
@@ -740,7 +790,7 @@ export function combatAttack(campaign, body) {
   const total = d.natural + toHit;
   const critical = d.natural === 20;
   // Attacks against an unconscious target within 5 ft are automatic crits in 5e; let the GPT flag it.
-  const autoCrit = Boolean(body.targetHelplessWithin5ft) && target.side === 'player' && ch.hp === 0;
+  const autoCrit = Boolean(body.targetHelplessWithin5ft) && target.side === 'player' && charFor(campaign, target).hp === 0;
   const hit = critical || (d.natural !== 1 && total >= armorClass);
   const result = {
     attacker: attacker.name,
@@ -781,7 +831,7 @@ export function adjustCombatant(campaign, combatantId, body) {
     result.status = applyDamageToCombatant(campaign, target, { type, amount, critical: Boolean(body.critical) });
     combatLog(combat, `${target.name} ${type === 'heal' ? 'heals' : type === 'temp' ? 'gains temp HP' : 'takes'} ${amount}${body.reason ? ` (${body.reason})` : ''}.`);
   }
-  const conditionsHolder = target.side === 'player' ? campaign.character : target;
+  const conditionsHolder = target.side === 'player' ? charFor(campaign, target) : target;
   if (body.addCondition) {
     const cond = normalizeKey(text(body.addCondition, 'addCondition', { required: true, max: 60 }));
     if (!conditionsHolder.conditions.includes(cond)) conditionsHolder.conditions.push(cond);
@@ -811,15 +861,17 @@ export function nextTurn(campaign) {
       combat.round += 1;
     }
     const cur = combat.combatants.find((x) => x.id === combat.order[combat.turnIndex]);
-    if (cur.side === 'player' || !cur.defeated) break;
+    if (cur.side === 'player' ? !charFor(campaign, cur).dead : !cur.defeated) break;
   }
   const view = combatView(campaign);
   const cur = view.currentTurn;
-  const ch = campaign.character;
   if (cur.side === 'player') {
+    const ch = charFor(campaign, combat.combatants.find((x) => x.id === cur.id));
     view.hint = ch.hp === 0 && !ch.dead
-      ? `${ch.name} is at 0 HP: roll a death save with makeCheck kind "death_save".`
-      : `It's ${ch.name}'s turn. Ask the player what they do.`;
+      ? `${ch.name} is at 0 HP: roll a death save with makeCheck kind "death_save", characterId "${cur.id}".`
+      : cur.id === 'player'
+        ? `It's ${ch.name}'s turn. Ask the player what they do.`
+        : `It's ${ch.name}'s turn (characterId "${cur.id}"). If the player is playing ${ch.name}, ask them; otherwise act for them as a companion.`;
   } else {
     view.hint = `It's ${cur.name}'s turn (${cur.side}). Decide its action, then use combatAttack with attackerId "${cur.id}".`;
   }
@@ -831,12 +883,23 @@ export function endCombat(campaign, body) {
   const defeated = combat.combatants.filter((x) => x.side === 'enemy' && x.defeated);
   const computedXp = defeated.reduce((s, x) => s + x.xp, 0);
   const xp = int(body?.xpOverride, 'xpOverride', { min: 0 }) ?? computedXp;
+  // 5e: encounter XP is divided evenly among the surviving characters who took part.
+  const heroes = heroesIn(combat).map((h) => ({ id: h.id, ch: charFor(campaign, h) })).filter((h) => !h.ch.dead);
+  const share = heroes.length ? Math.floor(xp / heroes.length) : 0;
+  const xpByCharacter = Object.fromEntries(heroes.map((h) => [h.id, { name: h.ch.name, ...awardXp(h.ch, share) }]));
+  const lead = campaign.character;
   const summary = {
     rounds: combat.round,
     defeated: defeated.map((x) => x.name),
     survivors: combat.combatants.filter((x) => x.side === 'enemy' && !x.defeated).map((x) => x.name),
-    xp: campaign.character.dead ? { awarded: 0 } : awardXp(campaign.character, xp),
-    character: { hp: campaign.character.hp, maxHp: campaign.character.maxHp, dead: campaign.character.dead },
+    xp: xpByCharacter.player ?? { awarded: 0 },
+    xpByCharacter,
+    totalXp: xp,
+    character: { hp: lead.hp, maxHp: lead.maxHp, dead: lead.dead },
+    party: heroesIn(combat).map((h) => {
+      const ch = charFor(campaign, h);
+      return { id: h.id, name: ch.name, hp: ch.hp, maxHp: ch.maxHp, dead: ch.dead };
+    }),
   };
   campaign.combat = null;
   return summary;
