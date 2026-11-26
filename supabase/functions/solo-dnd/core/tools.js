@@ -9,6 +9,7 @@ import {
 } from './game.js';
 import { DM_GUIDE } from './guide.js';
 import { syncCampaign } from './mirror.js';
+import { world, addThreat, updateThreat, worldTurn, threatView } from './world.js';
 import { books, postTransaction, upsertAccount, setHolding, updateShip, findShip, financeView, fleetSummary } from './ledgers.js';
 
 const now = () => new Date().toISOString();
@@ -206,6 +207,7 @@ const TOOLS = [
       name: S('Title'), setting: S('Setting'), tone: S('Tone'), location: S('Current location'),
       inGameDate: S('In-world date/time'), notes: S('Replace all DM notes'), appendNotes: S('Add a line to the DM notes'),
       scene: S('One or two sentences: the current scene and who is where (shown at the top of every handoff)'),
+      complicationOn: I('d20 result (2-21) at or above which a complication arises per day of passing time; default 17 (20%); 21 = never', { minimum: 2, maximum: 21 }),
     },
     run: async (a, { campaign: c, emit }) => {
       const fields = { name: 100, setting: 4000, tone: 200, location: 200, inGameDate: 100, notes: 8000, scene: 1000 };
@@ -220,9 +222,13 @@ const TOOLS = [
         c.notes = [c.notes, text(a.appendNotes, 'appendNotes', { max: 2000 })].filter(Boolean).join('\n');
         changed.push('appendNotes');
       }
+      if (a.complicationOn !== undefined) {
+        world(c).world.complicationOn = int(a.complicationOn, 'complicationOn', { min: 2, max: 21 });
+        changed.push('complicationOn');
+      }
       if (c.notes && c.notes.length > 8000) c.notes = c.notes.slice(-8000);
       if (changed.length) {
-        const shown = Object.fromEntries(changed.filter((k) => k !== 'notes').map((k) => [k, a[k]]));
+        const shown = Object.fromEntries(changed.filter((k) => k !== 'notes' && k !== 'appendNotes').map((k) => [k, a[k]]));
         emit(a.scene !== undefined ? 'scene' : 'campaign', `Campaign updated: ${changed.join(', ')}${a.location ? ` (location: ${a.location})` : ''}`, shown);
       }
       return campaignView(c);
@@ -841,6 +847,53 @@ const TOOLS = [
     },
   },
   {
+    name: 'addThreat',
+    title: 'Create a threat or opportunity clock',
+    description: 'Give the world its own agenda: a faction, villain, disaster or opportunity with a goal and a clock (segments) that advances by dice whenever time passes (advanceTime) and when the heroes ignore or provoke it. When full it TRIGGERS and its stakes happen. Keep 2-4 active.',
+    kind: 'write',
+    required: ['name', 'goal', 'stakes'],
+    properties: {
+      name: S('e.g. "The Continuity Directorate covers its tracks"'),
+      kind: { type: 'string', enum: ['threat', 'opportunity'] },
+      goal: S('What it is trying to achieve, in one sentence'),
+      stakes: S('What concretely happens if the clock fills'),
+      steps: list('Visible escalation steps, one per segment, in order (omens the heroes can notice)'),
+      segments: I('Clock size 2-12 (default 6)', { minimum: 2, maximum: 12 }),
+      filled: I('Already-filled segments (default 0)', { minimum: 0, maximum: 11 }),
+      pace: { type: 'string', enum: ['slow', 'steady', 'fast'], description: 'Chance to tick per day of in-game time: slow 1/6, steady 1/3, fast 1/2' },
+      secret: B('Hidden from the player: ledger and GitHub show only that "a hidden threat advanced"'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const t = addThreat(c, a);
+      emit('world', t.secret ? 'A hidden threat was set in motion' : `${t.kind === 'opportunity' ? 'Opportunity' : 'Threat'} in motion: ${t.name} (${t.filled}/${t.segments}, ${t.pace}) — stakes: ${t.stakes}`, { id: t.id });
+      return t;
+    },
+  },
+  {
+    name: 'updateThreat',
+    title: 'Advance, set back or resolve a threat',
+    description: 'Tick a clock forward when the heroes ignore, provoke or fail against it (tick +1/+2), back when they successfully act against it (tick -1/-2), or mark it resolved/defused. Always give the in-fiction reason.',
+    kind: 'write',
+    required: ['threatId'],
+    properties: {
+      threatId: S('Threat id or exact name'),
+      tick: I('Segments to add (negative to set back)', { minimum: -12, maximum: 12 }),
+      reason: S('What happened in the fiction (required with tick)'),
+      status: { type: 'string', enum: ['active', 'triggered', 'resolved', 'defused'] },
+      name: S('Rename'), goal: S('Goal'), stakes: S('Stakes'),
+      pace: { type: 'string', enum: ['slow', 'steady', 'fast'] },
+      secret: B('Hidden from the player'),
+    },
+    run: async (a, { campaign: c, emit }) => {
+      const r = updateThreat(c, a);
+      const t = r.threat;
+      const label = t.secret ? 'A hidden threat' : `"${t.name}"`;
+      const what = r.change ? `${r.change.from}→${r.change.to}/${t.segments}${t.status === 'triggered' ? ' — TRIGGERED' : ''} (${t.secret ? 'reason recorded privately' : a.reason})` : `status ${t.status}`;
+      emit('world', `${label} ${what}`, { id: t.id, status: t.status });
+      return r;
+    },
+  },
+  {
     name: 'recordEvent',
     title: 'Record a story event in the ledger',
     description: 'Permanently record a consequential non-dice outcome the moment it happens: decision, deal, money, discovery, scene outcome, XP-eligible milestone, canon fact or correction. Dice, HP, items and XP log themselves.',
@@ -902,7 +955,24 @@ const TOOLS = [
       clock.hour = totalHours % 24;
       clock.label = `Day ${clock.day}${clock.cycleLength ? `/${clock.cycleLength}` : ''}${clock.hour ? ` +${clock.hour}h` : ''}`;
       emit('time', `Time advances ${days ? `${days} day(s)` : ''}${days && hours ? ' ' : ''}${hours ? `${hours} hour(s)` : ''} (${reason}): ${before} → ${clock.label}`, { days, hours, reason, day: clock.day, hour: clock.hour });
-      return { clock, closeDue: Boolean(clock.cycleLength && clock.day >= clock.cycleLength) };
+      // The world moves while time passes: threat clocks roll, and a complication may arise.
+      const w = worldTurn(c, days + Math.floor(hours / 8));
+      for (const t of w.ticks) {
+        emit('world', t.secret ? `A hidden threat advanced (${t.from}→${t.to}/${t.of})${t.status === 'triggered' ? ' and is TRIGGERED' : ''}` : `${t.kind === 'opportunity' ? 'Opportunity' : 'Threat'} "${t.name}" advanced ${t.from}→${t.to}/${t.of}${t.status === 'triggered' ? ' — TRIGGERED' : ''}`, { id: t.id, from: t.from, to: t.to });
+      }
+      if (w.complication) emit('world', `Complication arises during the wait (d20 ${w.complication.d20} vs ${w.complication.needed}+)`, { d20: w.complication.d20 });
+      const triggered = w.ticks.filter((t) => t.status === 'triggered');
+      return {
+        clock,
+        closeDue: Boolean(clock.cycleLength && clock.day >= clock.cycleLength),
+        world: {
+          ...w,
+          mustNarrate: w.ticks.length || w.complication
+            ? 'The world moved. Before anything else, show the player the visible signs of each advanced threat (its next step), play out any TRIGGERED threat now, and run the complication if one arose. Secret threats show only their effects, never their names.'
+            : 'Quiet period: nothing advanced.',
+          triggered: triggered.map((t) => ({ name: t.name, stakes: t.stakes })),
+        },
+      };
     },
   },
   {
@@ -956,6 +1026,7 @@ const TOOLS = [
         characters: [brief(c.character), ...(c.party ?? []).map(brief)].filter(Boolean),
         combat: combatView(c),
         relationships: relationshipView(c),
+        threats: threatView(c),
         ...(c.finances?.accounts?.length ? { finances: financeView(c, { full: false }), financeNote: 'Balances only; read getFinances before any money decision. Money moves only via postTransaction.' } : {}),
         ...(c.fleet?.length ? { fleet: fleetSummary(c) } : {}),
         openThreads: (c.quests ?? []).filter((q) => q.status === 'active').map((q) => ({ id: q.id, title: q.title, latest: q.progress.at(-1) ?? null })),

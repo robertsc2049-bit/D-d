@@ -337,3 +337,31 @@ test('books: accounts, transfers, equity and fleet are ledgered and validated', 
   assert.equal(renderFinances(c), null, 'getCampaign view has no books; mirror renders from the raw campaign');
   assert.match(renderFleet({ name: 'x', fleet: [{ designation: 'MRC-1', name: 'First Light' }] }), /\| MRC-1 \| First Light \|/);
 });
+
+test('living world: threat clocks tick by dice when time passes, trigger, and stay secret when asked', async () => {
+  const { ok, call, id } = await setup();
+  await ok('setClock', { campaignId: id, day: 1, cycleLength: 28, reason: 'test' });
+  await ok('addThreat', { campaignId: id, name: 'Raiders regroup', goal: 'Retake their ships', stakes: 'They strike the convoy', steps: ['scouts seen', 'raid on a depot', 'fleet gathers', 'attack'], segments: 4, pace: 'fast' });
+  await ok('addThreat', { campaignId: id, name: 'Cabal', goal: 'Bury evidence', stakes: 'Witness vanishes', segments: 6, pace: 'slow', secret: true });
+  assert.equal((await call('addThreat', { campaignId: id, name: 'raiders regroup', goal: 'x', stakes: 'y' })).ok, false);
+  // every die shows 6 → every threat ticks every day; d20 of 6 never reaches the default 17 → no complication
+  const r = await withDice(6, () => ok('advanceTime', { campaignId: id, days: 3, reason: 'travel' }));
+  const raid = r.world.ticks.find((t) => t.name === 'Raiders regroup');
+  assert.deepEqual([raid.from, raid.to, raid.step], [0, 3, 'fleet gathers']);
+  assert.equal(r.world.complication, null);
+  const r2 = await withDice(20, () => ok('advanceTime', { campaignId: id, days: 2, reason: 'wait' }));
+  assert.equal(r2.world.triggered[0].name, 'Raiders regroup');
+  assert.ok(r2.world.complication, 'a natural 20 raises a complication');
+  const h = await ok('getHandoff', { campaignId: id, recentEvents: 30 });
+  assert.equal(h.threats.find((t) => t.name === 'Raiders regroup').status, 'triggered');
+  assert.ok(h.recentEvents.some((e) => e.summary.startsWith('A hidden threat advanced')));
+  assert.ok(!h.recentEvents.some((e) => e.summary.includes('Cabal')), 'secret threat names stay out of the ledger');
+  const u = await ok('updateThreat', { campaignId: id, threatId: 'Cabal', tick: -1, reason: 'witness moved to safety' });
+  assert.equal(u.change.to, u.change.from - 1);
+  await ok('updateThreat', { campaignId: id, threatId: 'Raiders regroup', status: 'resolved' });
+  assert.equal((await ok('getHandoff', { campaignId: id })).threats.length, 1);
+  const { renderHandoff } = await import('../supabase/functions/solo-dnd/core/mirror.js');
+  const md = renderHandoff({ name: 'x', threats: [{ name: 'Open', kind: 'threat', filled: 1, segments: 4, pace: 'slow', status: 'active', stakes: 'boom', secret: false, steps: [] }, { name: 'Hidden', kind: 'threat', filled: 1, segments: 4, pace: 'slow', status: 'active', stakes: 'x', secret: true, steps: [] }] }, []);
+  assert.match(md, /Open\*\* \(threat\) — clock 1\/4/);
+  assert.ok(!md.includes('Hidden'));
+});

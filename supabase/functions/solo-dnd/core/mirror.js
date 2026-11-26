@@ -1,6 +1,7 @@
 // GitHub mirror: commits the live state and the event ledger into a folder of a GitHub repository,
 // in ONE commit per sync, using the Git Data API. It only ever writes inside the configured folder.
 import { renderFinances, renderFleet } from './ledgers.js';
+import { threatView } from './world.js';
 // Campaign config: campaign.mirror = { repo: "owner/name", branch: "main", path: "campaigns/x/live" }.
 
 const MONTH = (iso) => iso.slice(0, 7);
@@ -69,6 +70,8 @@ export function renderHandoff(campaign, recent) {
         + `${n.relationship ? `: ${escapeMd(n.relationship)}` : ''}${last ? ` _Latest: ${last.day ? `${escapeMd(last.day)}: ` : ''}${escapeMd(last.note)}_` : ''}`;
     }), '');
   }
+  const fronts = threatView(campaign, { dm: false });
+  if (fronts.length) lines.push('## Threats and opportunities in motion', ...fronts.map((t) => `- **${escapeMd(t.name)}** (${t.kind}) — clock ${t.clock}, ${t.pace}${t.status === 'triggered' ? ', TRIGGERED' : ''}: ${escapeMd(t.stakes)}`), '');
   const open = (campaign.quests ?? []).filter((q) => q.status === 'active');
   if (open.length) lines.push('## Open threads', ...open.map((q) => `- ${escapeMd(q.title)}${q.progress?.length ? ` — latest: ${escapeMd(q.progress.at(-1))}` : ''}`), '');
   lines.push('## Most recent events', ...recent.map(renderLedgerLine), '');
